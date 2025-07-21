@@ -67,11 +67,17 @@ def find_schools():
 
     # Geocode with Nominatim
     lat, lon = geocode_nominatim(address)
+    print(f"Geocoded '{address}' to: {lat}, {lon}")
     if lat is None or lon is None:
+        print("Nominatim failed to geocode address.")
         return jsonify({"error": "Address not found"}), 404
 
-    # Find schools with Overpass
     osm_schools = find_osm_schools(lat, lon, 5000, keywords)
+    print(f"Overpass returned {len(osm_schools)} schools")
+    if not osm_schools:
+        print("No schools found by Overpass.")
+        return jsonify({"error": "No schools found"}), 404
+
     # Filter out already-partnered schools as before
     happy_feet_names = set([normalize_name(s.name) for s in HappyFeetSchool.query.all()])
     psa_names = set([normalize_name(s.name) for s in PSASchool.query.all()])
@@ -96,6 +102,59 @@ def find_schools():
         "location": {"lat": lat, "lng": lon}
     })
 
+def geocode_nominatim(address):
+    url = "https://nominatim.openstreetmap.org/search"
+    params = {
+        "q": address,
+        "format": "json",
+        "countrycodes": "us",
+        "addressdetails": 1,
+        "limit": 5
+    }
+    headers = {"User-Agent": "PSA SchoolFinder/1.0"}
+    resp = requests.get(url, params=params, headers=headers)
+    data = resp.json()
+    # Only accept results that are US postal codes
+    for result in data:
+        if result.get("type") == "postcode" and result.get("address", {}).get("country_code") == "us":
+            return float(result["lat"]), float(result["lon"])
+    # fallback to first result if no postal code found
+    if data:
+        return float(data[0]["lat"]), float(data[0]["lon"])
+    return None, None
+
+def find_osm_schools(lat, lon, radius=5000, keywords=None):
+    if not keywords:
+        keywords = ["school", "kindergarten", "childcare"]
+    overpass_url = "https://overpass-api.de/api/interpreter"
+    # Query for nodes, ways, and relations
+    query = f"""
+    [out:json];
+    (
+      {"".join([f'node["amenity"="{kw}"](around:{radius},{lat},{lon});' for kw in keywords])}
+      {"".join([f'way["amenity"="{kw}"](around:{radius},{lat},{lon});' for kw in keywords])}
+      {"".join([f'relation["amenity"="{kw}"](around:{radius},{lat},{lon});' for kw in keywords])}
+    );
+    out center;
+    """
+    headers = {"User-Agent": "PSA SchoolFinder/1.0"}
+    try:
+        resp = requests.post(overpass_url, data=query, headers=headers, timeout=30)
+        data = resp.json()
+        elements = data.get("elements", [])
+        print(f"Overpass API success, got {len(elements)} elements")
+        # For ways/relations, use 'center' for lat/lon
+        for el in elements:
+            if el["type"] in ("way", "relation"):
+                el["lat"] = el.get("center", {}).get("lat")
+                el["lon"] = el.get("center", {}).get("lon")
+        # Filter out any without lat/lon (shouldn't happen, but safe)
+        elements = [el for el in elements if el.get("lat") is not None and el.get("lon") is not None]
+        return elements
+    except Exception as e:
+        print("Overpass API error:", e)
+        return []
+
 # ===== Route Planning API =====
 @app.route("/api/route-plan", methods=["POST"])
 def route_plan():
@@ -117,34 +176,6 @@ def route_plan():
     route = [schools[i]["place_id"] for i in order]
     return jsonify({"route": route})
 
-# ===== Nominatim Geocoding =====
-def geocode_nominatim(address):
-    url = "https://nominatim.openstreetmap.org/search"
-    params = {"q": address, "format": "json"}
-    headers = {"User-Agent": "PSA SchoolFinder/1.0"}
-    resp = requests.get(url, params=params, headers=headers)
-    data = resp.json()
-    if data:
-        return float(data[0]["lat"]), float(data[0]["lon"])
-    return None, None
-
-# ===== Overpass API for Schools =====
-def find_osm_schools(lat, lon, radius=5000, keywords=None):
-    if not keywords:
-        keywords = ["school", "kindergarten", "childcare"]
-    overpass_url = "https://overpass-api.de/api/interpreter"
-    # Build Overpass QL query for all keywords
-    query = f"""
-    [out:json];
-    (
-      {"".join([f'node["amenity"="{kw}"](around:{radius},{lat},{lon});' for kw in keywords])}
-    );
-    out;
-    """
-    headers = {"User-Agent": "PSA SchoolFinder/1.0"}
-    resp = requests.post(overpass_url, data=query, headers=headers)
-    return resp.json()["elements"]
-
 # ===== OSRM Routing =====
 def osrm_route(start, waypoints):
     # start: (lat, lon), waypoints: list of (lat, lon)
@@ -157,3 +188,10 @@ def osrm_route(start, waypoints):
         # Return the order of waypoints (excluding the start)
         return data["trips"][0]["waypoint_indices"][1:]
     return list(range(len(waypoints)))
+
+try:
+    resp = requests.get("https://nominatim.openstreetmap.org/search?q=20120&format=json&countrycodes=us")
+    print("Nominatim status code:", resp.status_code)
+    print("Nominatim response:", resp.text)
+except Exception as e:
+    print("Nominatim request failed:", e)
