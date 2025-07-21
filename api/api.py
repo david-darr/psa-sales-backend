@@ -5,18 +5,27 @@ from flask_sqlalchemy import SQLAlchemy
 from flask_cors import CORS
 from dotenv import load_dotenv
 import re
+from itertools import permutations
+from math import radians, cos, sin, sqrt, atan2
+
+
 
 # ===== Start Up =====
-load_dotenv()  # loads .env
+load_dotenv() # loads .env
+GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
 
 app = Flask(__name__)
 CORS(app)
+
+
 
 # ===== SQL Database API =====
 app.config['SQLALCHEMY_DATABASE_URI'] = (
     'postgresql://postgres.dlnfvtudzyyabixedniz:Pandaplayz6!@aws-0-us-east-1.pooler.supabase.com:6543/postgres'
 )
 db = SQLAlchemy(app)
+
+
 
 # ===== School List API =====
 class School(db.Model):
@@ -28,6 +37,7 @@ class School(db.Model):
     contact = db.Column(db.String, nullable=False)
     email = db.Column(db.String, nullable=False)
 
+# Add models for the two other tables
 class HappyFeetSchool(db.Model):
     __tablename__ = 'Happy Feet Schools'
     id = db.Column(db.Integer, primary_key=True)
@@ -46,7 +56,8 @@ def get_schools():
         for s in schools
     ])
 
-# ===== Utility: Normalize Names =====
+
+# ===== School Finder API =====
 def normalize_name(name):
     """Lowercase, remove non-alphanumeric, and extra spaces for fuzzy matching."""
     if not name:
@@ -56,106 +67,84 @@ def normalize_name(name):
     name = re.sub(r'\s+', ' ', name)
     return name.strip()
 
-# ===== School Finder API =====
 @app.route("/api/find-schools", methods=["POST"])
 def find_schools():
     data = request.get_json()
     address = data.get("address")
-    keywords = data.get("keywords", ["school", "kindergarten", "childcare"])
+    keywords = data.get("keywords", ["elementary school", "day care", "preschool", "kindercare", "montessori"])
     if not address:
         return jsonify({"error": "No address provided"}), 400
 
-    # Geocode with Nominatim
-    lat, lon = geocode_nominatim(address)
-    print(f"Geocoded '{address}' to: {lat}, {lon}")
-    if lat is None or lon is None:
-        print("Nominatim failed to geocode address.")
-        return jsonify({"error": "Address not found"}), 404
-
-    osm_schools = find_osm_schools(lat, lon, 5000, keywords)
-    print(f"Overpass returned {len(osm_schools)} schools")
-    if not osm_schools:
-        print("No schools found by Overpass.")
-        return jsonify({"error": "No schools found"}), 404
-
-    # Filter out already-partnered schools as before
+    # Get normalized names of schools we already do business with
     happy_feet_names = set([normalize_name(s.name) for s in HappyFeetSchool.query.all()])
     psa_names = set([normalize_name(s.name) for s in PSASchool.query.all()])
     excluded_names = happy_feet_names | psa_names
 
+    # Geocode the address
+    geo_url = f"https://maps.googleapis.com/maps/api/geocode/json"
+    geo_params = {"address": address, "key": GOOGLE_API_KEY}
+    geo_resp = requests.get(geo_url, params=geo_params).json()
+    if not geo_resp["results"]:
+        return jsonify({"error": "Address not found"}), 404
+    location = geo_resp["results"][0]["geometry"]["location"]
+
+    # Find nearby schools using Places API
+    places_url = "https://maps.googleapis.com/maps/api/place/nearbysearch/json"
+    base_params = {
+        "location": f"{location['lat']},{location['lng']}",
+        "radius": 5000,
+        "key": GOOGLE_API_KEY
+    }
+
+    results = []
+    for place_type in ["school"]:
+        for kw in keywords:
+            params = base_params.copy()
+            params["type"] = place_type
+            params["keyword"] = kw
+            resp = requests.get(places_url, params=params).json()
+            results.extend(resp.get("results", []))
+
+    # Remove duplicates by place_id
+    unique = {}
+    for result in results:
+        pid = result.get("place_id")
+        if pid and pid not in unique:
+            unique[pid] = result
+
+    # Filter out schools that are already in Happy Feet or PSA tables (fuzzy match)
     schools = []
-    for s in osm_schools:
-        name = s.get("tags", {}).get("name", "")
-        norm_name = normalize_name(name)
+    for result in unique.values():
+        school_name = result.get("name", "")
+        norm_name = normalize_name(school_name)
+        # Exact or very close match (allow for minor variations)
         if any(norm_name == ex or norm_name in ex or ex in norm_name for ex in excluded_names):
             continue
         schools.append({
-            "name": name,
-            "address": s.get("tags", {}).get("addr:full", ""),
-            "lat": s["lat"],
-            "lng": s["lon"],
-            "place_id": str(s["id"])
+            "name": result.get("name"),
+            "address": result.get("vicinity"),
+            "lat": result["geometry"]["location"]["lat"],
+            "lng": result["geometry"]["location"]["lng"],
+            "place_id": result.get("place_id")
         })
 
     return jsonify({
         "schools": schools,
-        "location": {"lat": lat, "lng": lon}
+        "location": location,
+        "google_api_key": GOOGLE_API_KEY
     })
 
-def geocode_nominatim(address):
-    url = "https://nominatim.openstreetmap.org/search"
-    params = {
-        "q": address,
-        "format": "json",
-        "countrycodes": "us",
-        "addressdetails": 1,
-        "limit": 5
-    }
-    headers = {"User-Agent": "PSA SchoolFinder/1.0"}
-    resp = requests.get(url, params=params, headers=headers)
-    data = resp.json()
-    # Only accept results that are US postal codes
-    for result in data:
-        if result.get("type") == "postcode" and result.get("address", {}).get("country_code") == "us":
-            return float(result["lat"]), float(result["lon"])
-    # fallback to first result if no postal code found
-    if data:
-        return float(data[0]["lat"]), float(data[0]["lon"])
-    return None, None
-
-def find_osm_schools(lat, lon, radius=5000, keywords=None):
-    if not keywords:
-        keywords = ["school", "kindergarten", "childcare"]
-    overpass_url = "https://overpass-api.de/api/interpreter"
-    # Query for nodes, ways, and relations
-    query = f"""
-    [out:json];
-    (
-      {"".join([f'node["amenity"="{kw}"](around:{radius},{lat},{lon});' for kw in keywords])}
-      {"".join([f'way["amenity"="{kw}"](around:{radius},{lat},{lon});' for kw in keywords])}
-      {"".join([f'relation["amenity"="{kw}"](around:{radius},{lat},{lon});' for kw in keywords])}
-    );
-    out center;
-    """
-    headers = {"User-Agent": "PSA SchoolFinder/1.0"}
-    try:
-        resp = requests.post(overpass_url, data=query, headers=headers, timeout=30)
-        data = resp.json()
-        elements = data.get("elements", [])
-        print(f"Overpass API success, got {len(elements)} elements")
-        # For ways/relations, use 'center' for lat/lon
-        for el in elements:
-            if el["type"] in ("way", "relation"):
-                el["lat"] = el.get("center", {}).get("lat")
-                el["lon"] = el.get("center", {}).get("lon")
-        # Filter out any without lat/lon (shouldn't happen, but safe)
-        elements = [el for el in elements if el.get("lat") is not None and el.get("lon") is not None]
-        return elements
-    except Exception as e:
-        print("Overpass API error:", e)
-        return []
 
 # ===== Route Planning API =====
+def haversine(lat1, lng1, lat2, lng2):
+    # Calculate the great-circle distance between two points
+    R = 6371  # Earth radius in km
+    dlat = radians(lat2 - lat1)
+    dlng = radians(lng2 - lng1)
+    a = sin(dlat/2)**2 + cos(radians(lat1)) * cos(radians(lat2)) * sin(dlng/2)**2
+    c = 2 * atan2(sqrt(a), sqrt(1-a))
+    return R * c
+
 @app.route("/api/route-plan", methods=["POST"])
 def route_plan():
     data = request.get_json()
@@ -166,17 +155,72 @@ def route_plan():
     if not start_address:
         return jsonify({"error": "No starting address provided"}), 400
 
-    # Geocode start address
-    start_lat, start_lon = geocode_nominatim(start_address)
-    if start_lat is None or start_lon is None:
+    # Geocode the starting address
+    geo_url = f"https://maps.googleapis.com/maps/api/geocode/json"
+    geo_params = {"address": start_address, "key": GOOGLE_API_KEY}
+    geo_resp = requests.get(geo_url, params=geo_params).json()
+    if not geo_resp["results"]:
         return jsonify({"error": "Starting address not found"}), 404
+    start_location = geo_resp["results"][0]["geometry"]["location"]
+    start_lat, start_lng = start_location["lat"], start_location["lng"]
 
-    waypoints = [(s["lat"], s["lng"]) for s in schools]
-    order = osrm_route((start_lat, start_lon), waypoints)
-    route = [schools[i]["place_id"] for i in order]
+    # Build distance matrix (from start to each school, and between schools)
+    n = len(schools)
+    dist = [[0]*n for _ in range(n)]
+    for i in range(n):
+        for j in range(n):
+            if i != j:
+                dist[i][j] = haversine(
+                    schools[i]["lat"], schools[i]["lng"],
+                    schools[j]["lat"], schools[j]["lng"]
+                )
+
+    # Calculate distance from start to each school
+    start_to_school = [
+        haversine(start_lat, start_lng, s["lat"], s["lng"]) for s in schools
+    ]
+
+    # Brute-force TSP starting from start location
+    from itertools import permutations
+    indices = list(range(n))
+    min_order = None
+    min_dist = float('inf')
+    for perm in permutations(indices):
+        d = start_to_school[perm[0]]  # from start to first school
+        d += sum(dist[perm[i]][perm[i+1]] for i in range(n-1))
+        if d < min_dist:
+            min_dist = d
+            min_order = perm
+
+    route = [schools[i]["place_id"] for i in min_order]
     return jsonify({"route": route})
 
-# ===== OSRM Routing =====
+def geocode_nominatim(address):
+    url = "https://nominatim.openstreetmap.org/search"
+    params = {"q": address, "format": "json"}
+    headers = {"User-Agent": "PSA SchoolFinder/1.0"}
+    resp = requests.get(url, params=params, headers=headers)
+    data = resp.json()
+    if data:
+        return float(data[0]["lat"]), float(data[0]["lon"])
+    return None, None
+
+def find_osm_schools(lat, lon, radius=5000, keywords=None):
+    if not keywords:
+        keywords = ["school", "kindergarten", "childcare"]
+    overpass_url = "https://overpass-api.de/api/interpreter"
+    # Build Overpass QL query for all keywords
+    query = f"""
+    [out:json];
+    (
+      {"".join([f'node["amenity"="{kw}"](around:{radius},{lat},{lon});' for kw in keywords])}
+    );
+    out;
+    """
+    headers = {"User-Agent": "PSA SchoolFinder/1.0"}
+    resp = requests.post(overpass_url, data=query, headers=headers)
+    return resp.json()["elements"]
+
 def osrm_route(start, waypoints):
     # start: (lat, lon), waypoints: list of (lat, lon)
     coords = [f"{start[1]},{start[0]}"] + [f"{lon},{lat}" for lat, lon in waypoints]
@@ -188,10 +232,3 @@ def osrm_route(start, waypoints):
         # Return the order of waypoints (excluding the start)
         return data["trips"][0]["waypoint_indices"][1:]
     return list(range(len(waypoints)))
-
-try:
-    resp = requests.get("https://nominatim.openstreetmap.org/search?q=20120&format=json&countrycodes=us")
-    print("Nominatim status code:", resp.status_code)
-    print("Nominatim response:", resp.text)
-except Exception as e:
-    print("Nominatim request failed:", e)
