@@ -1,0 +1,292 @@
+/* =========================
+   GLOBAL STYLES
+   ========================= */
+
+body, #root {
+  min-height: 100vh;
+  margin: 0;
+  background: #f5f5f5;
+  color: #f5f5f5;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.mobile-header-container {
+  position: absolute;
+  top: 0px;
+  left: 0%;
+  right: 0%;
+  z-index: 100;
+  background: #c40c0c;
+  color: #fff;
+  padding-top: 0;
+  padding-bottom: 0;
+  padding-left: 0;
+  padding-right: 24px;
+  display: flex;
+  align-items: center;
+  gap: 24px;
+  font-size: 1.25rem;
+  font-weight: 600;
+  box-shadow: 0 4px 24px rgba(0,0,0,0.12);
+  width: auto;
+  box-sizing: border-box;
+  height: 80px; 
+  overflow: hidden;
+}
+.header-container {
+  position: absolute;
+  top: 30px;
+  left: 10%;
+  right: 10%;
+  z-index: 100;
+  background: #c40c0c;
+  color: #fff;
+  border-radius: 999px;
+  padding-top: 0;
+  padding-bottom: 0;
+  padding-left: 0;
+  padding-right: 24px;
+  display: flex;
+  align-items: center;
+  gap: 24px;
+  font-size: 1.25rem;
+  font-weight: 600;
+  box-shadow: 0 4px 24px rgba(0,0,0,0.12);
+  width: auto;
+  box-sizing: border-box;
+  height: 80px; 
+  overflow: hidden;
+}
+
+
+
+/* =========================
+   LOGO STYLES
+   ========================= */
+
+.logo {
+  height: 100%;
+  width: auto;
+  border-radius: 999px 0 0 999px;
+  object-fit: cover;
+  display: block;
+}
+
+
+
+
+/* =========================
+   CARD & DOCS STYLES
+   ========================= */
+
+.card {
+  padding: 2em;
+}
+.read-the-docs {
+  color: #888;
+}
+
+
+
+/* =========================
+   HOME PAGE STYLES
+   ========================= */
+
+.home-btn {
+  background: #c40c0c;
+  font-family: "futura-pt", Verdana, Arial, sans-serif;
+  font-weight: 700;
+  font-size: 16px;
+  letter-spacing: 0px;
+  text-align: left;
+  text-transform: uppercase;
+  border: none;
+  color: #fff;
+  padding: 10px 22px;
+  border-bottom: 3px solid transparent;
+  transition: border-bottom 0.2s;
+  outline: none;
+  box-shadow: none;
+}
+.home-btn:hover,
+.home-btn:focus {
+  background: #f42222;
+  border-bottom: 3px solid #fff;
+  outline: none;
+  box-shadow: none;
+}
+
+
+
+/* =========================
+   SECTION HEADER & TITLES
+   ========================= */
+
+h1 {
+  color: #e53935;
+  margin-bottom: 2rem;
+  font-size: 2.5rem;
+  font-weight: 800;
+  letter-spacing: 1px;
+  text-shadow: 0 2px 8px rgba(0,0,0,0.25);
+  text-align: center;
+}
+a {
+  color: #e53935;
+  text-decoration: none;
+}
+a:hover {
+  text-decoration: underline;
+}
+.section-header {
+  position: absolute;
+  top: 20px;
+  left: 25px;
+  display: flex;
+  align-items: center;
+  z-index: 10;
+}
+.section-title {
+  font-size: 2.5rem;
+  font-weight: 800;
+  letter-spacing: 1px;
+  color: #e53935;
+  margin: 0;
+  text-align: left;
+}
+
+
+
+/* =========================
+   BACK BUTTON
+   ========================= */
+
+.back-btn-global {
+  margin-right: 32px;
+  background: #e53935;
+  color: #fff;
+  border: none;
+  border-radius: 6px;
+  padding: 10px 22px;
+  font-size: 1.1rem;
+  font-weight: 600;
+  cursor: pointer;
+  box-shadow: 0 2px 8px 0 rgba(229, 57, 53, 0.10);
+  transition: background 0.2s, transform 0.1s;
+}
+.back-btn-global:hover {
+  background: #ff2d2d;
+  transform: translateY(-2px) scale(1.03);
+}
+
+
+
+/* =========================
+   SCHOOLS LIST & TABLE
+   ========================= */
+
+.schools-table {
+  width: 100%;
+  max-width: 700px;
+  border-collapse: collapse;
+  margin: 0 auto;
+  background: #232323;
+  color: #fff;
+  border-radius: 12px;
+  overflow: hidden;
+  box-shadow: 0 2px 12px rgba(0,0,0,0.15);
+}
+.schools-table th, .schools-table td {
+  padding: 16px 20px;
+  text-align: left;
+}
+.schools-table th {
+  background: #e53935;
+  color: #fff;
+  font-size: 1.1rem;
+  font-weight: 700;
+}
+.schools-table tr:nth-child(even) {
+  background: #292929;
+}
+.schools-table tr:nth-child(odd) {
+  background: #232323;
+}
+.schools-list-container {
+  position: absolute;
+  top: 0;
+  right: 0;
+  padding: 40px 0 0 40px;
+  width: auto;
+  min-width: 700px;
+  min-height: 100vh;
+  box-sizing: border-box;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  background: transparent;
+}
+.schools-table-scroll-container {
+  max-height: 750px; 
+  overflow-y: auto;
+  width: 100%;
+  margin-top: 20px;
+  border-radius: 12px;
+  box-shadow: 0 2px 12px rgba(0,0,0,0.15);
+  background: #232323;
+}
+.schools-search-bar {
+  width: 100%;
+  max-width: 400px;
+  margin-bottom: 16px;
+  padding: 10px 16px;
+  font-size: 1rem;
+  border-radius: 8px;
+  border: 1px solid #e53935;
+  background: #181818;
+  color: #fff;
+  outline: none;
+  box-sizing: border-box;
+}
+.schools-search-bar:focus {
+  border-color: #ff2d2d;
+}
+.schools-keyword-label {
+  color: #000;
+  font-weight: 600;
+}
+.schools-keyword-label input[type="checkbox"] {
+  accent-color: #000;
+}
+
+
+
+/* =========================
+   SCHOOLS FINDER & MAP
+   ========================= */
+.schoolfinder-flex {
+  display: flex;
+  flex-direction: row;
+  gap: 40px;
+  margin-top: 32px;
+}
+.schoolfinder-list {
+  min-width: 300px;
+  max-width: 350px;
+  background: #232323;
+  border-radius: 12px;
+  padding: 24px;
+  color: #fff;
+  box-shadow: 0 2px 12px rgba(0,0,0,0.15);
+  height: fit-content;
+  max-height: 420px;
+  overflow-y: auto;
+}
+.schoolfinder-map {
+  min-width: 600px;
+  min-height: 400px;
+  display: flex;
+  align-items: flex-start;
+  justify-content: flex-end;
+}
