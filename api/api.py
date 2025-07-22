@@ -195,40 +195,4 @@ def route_plan():
     route = [schools[i]["place_id"] for i in min_order]
     return jsonify({"route": route})
 
-def geocode_nominatim(address):
-    url = "https://nominatim.openstreetmap.org/search"
-    params = {"q": address, "format": "json"}
-    headers = {"User-Agent": "PSA SchoolFinder/1.0"}
-    resp = requests.get(url, params=params, headers=headers)
-    data = resp.json()
-    if data:
-        return float(data[0]["lat"]), float(data[0]["lon"])
-    return None, None
 
-def find_osm_schools(lat, lon, radius=5000, keywords=None):
-    if not keywords:
-        keywords = ["school", "kindergarten", "childcare"]
-    overpass_url = "https://overpass-api.de/api/interpreter"
-    # Build Overpass QL query for all keywords
-    query = f"""
-    [out:json];
-    (
-      {"".join([f'node["amenity"="{kw}"](around:{radius},{lat},{lon});' for kw in keywords])}
-    );
-    out;
-    """
-    headers = {"User-Agent": "PSA SchoolFinder/1.0"}
-    resp = requests.post(overpass_url, data=query, headers=headers)
-    return resp.json()["elements"]
-
-def osrm_route(start, waypoints):
-    # start: (lat, lon), waypoints: list of (lat, lon)
-    coords = [f"{start[1]},{start[0]}"] + [f"{lon},{lat}" for lat, lon in waypoints]
-    coord_str = ";".join(coords)
-    url = f"http://router.project-osrm.org/trip/v1/driving/{coord_str}?source=first&roundtrip=false"
-    resp = requests.get(url)
-    data = resp.json()
-    if data["code"] == "Ok":
-        # Return the order of waypoints (excluding the start)
-        return data["trips"][0]["waypoint_indices"][1:]
-    return list(range(len(waypoints)))
