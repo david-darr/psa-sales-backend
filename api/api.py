@@ -7,6 +7,8 @@ from dotenv import load_dotenv
 import re
 from itertools import permutations
 from math import radians, cos, sin, sqrt, atan2
+import gspread
+from oauth2client.service_account import ServiceAccountCredentials
 
 
 
@@ -25,6 +27,39 @@ app.config['SQLALCHEMY_DATABASE_URI'] = (
 )
 db = SQLAlchemy(app)
 
+
+# === Global variable to store all sheets data ===
+ALL_SHEET_DATA = {}
+
+def load_all_sheets():
+    # Setup credentials and open the Google Sheet
+    scope = ['https://spreadsheets.google.com/feeds', 'https://www.googleapis.com/auth/drive']
+    creds = ServiceAccountCredentials.from_json_keyfile_name('school-lists-459815-3b5b11e369bc.json', scope)
+    client = gspread.authorize(creds)
+    sheet = client.open('PSA sales from Scratch') 
+
+    all_data = {}
+    for worksheet in sheet.worksheets():
+        # Get all values as a list of rows
+        rows = worksheet.get_all_values()
+        all_data[worksheet.title] = rows
+    return all_data
+
+# Load all sheets into memory at startup
+ALL_SHEET_DATA = load_all_sheets()
+
+def get_all_sheet_school_names():
+    excluded_names = set()
+    for sheet_rows in ALL_SHEET_DATA.values():
+        for row in sheet_rows:
+            if row and row[0]:
+                excluded_names.add(normalize_name(row[0]))
+    return excluded_names
+
+@app.route("/api/team-sheets", methods=["GET"])
+def get_team_sheets():
+    # Returns all sheet data for frontend display
+    return jsonify(ALL_SHEET_DATA)
 
 
 # ===== School List API =====
@@ -78,7 +113,7 @@ def find_schools():
     # Get normalized names of schools we already do business with
     happy_feet_names = set([normalize_name(s.name) for s in HappyFeetSchool.query.all()])
     psa_names = set([normalize_name(s.name) for s in PSASchool.query.all()])
-    excluded_names = happy_feet_names | psa_names
+    excluded_names = happy_feet_names | psa_names | get_all_sheet_school_names()
 
     # Geocode the address
     geo_url = f"https://maps.googleapis.com/maps/api/geocode/json"
