@@ -120,6 +120,8 @@ def find_schools():
     psa_names = set([normalize_name(s.name) for s in PSASchool.query.all()])
     excluded_names = happy_feet_names | psa_names | get_all_sheet_school_names()
 
+    print("Excluded schools:", excluded_names)  # <-- Add this line
+
     # Geocode the address
     geo_url = f"https://maps.googleapis.com/maps/api/geocode/json"
     geo_params = {"address": address, "key": GOOGLE_API_KEY}
