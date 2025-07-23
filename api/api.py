@@ -19,7 +19,7 @@ GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
 
 app = Flask(__name__)
 CORS(app)
-#hello
+
 
 
 # ===== SQL Database API =====
@@ -34,7 +34,10 @@ ALL_SHEET_DATA = {}
 
 def load_all_sheets():
     scope = ['https://spreadsheets.google.com/feeds', 'https://www.googleapis.com/auth/drive']
-    service_account_info = json.loads(os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON"))
+    service_account_json = os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON")
+    service_account_info = json.loads(service_account_json)
+    # Always replace double-escaped newlines with real newlines
+    service_account_info["private_key"] = service_account_info["private_key"].replace("\\n", "\n")
     creds = ServiceAccountCredentials.from_json_keyfile_dict(service_account_info, scope)
     client = gspread.authorize(creds)
     sheet = client.open('PSA sales from Scratch')
