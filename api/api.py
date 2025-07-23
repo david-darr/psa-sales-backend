@@ -67,7 +67,7 @@ def get_all_sheet_school_names():
 @app.route("/api/team-sheets", methods=["GET"])
 def get_team_sheets():
     # Returns all sheet data for frontend display
-    return jsonify(load_all_sheets())
+    return jsonify(ALL_SHEET_DATA)
 
 
 # ===== School List API =====
