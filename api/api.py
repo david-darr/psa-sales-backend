@@ -8,6 +8,7 @@ import re
 from itertools import permutations
 from math import radians, cos, sin, sqrt, atan2
 import gspread
+import json
 from oauth2client.service_account import ServiceAccountCredentials
 
 
@@ -34,7 +35,9 @@ ALL_SHEET_DATA = {}
 def load_all_sheets():
     # Setup credentials and open the Google Sheet
     scope = ['https://spreadsheets.google.com/feeds', 'https://www.googleapis.com/auth/drive']
-    creds = ServiceAccountCredentials.from_json_keyfile_name('school-lists-459815-3b5b11e369bc.json', scope)
+    #service_account_info = json.loads(os.environ["GOOGLE_SERVICE_ACCOUNT_JSON"])
+    #creds = ServiceAccountCredentials.from_json_keyfile_dict(service_account_info, scope)
+    creds = ServiceAccountCredentials.from_json_keyfile_name('../school-lists-459815-3b5b11e369bc.json', scope)
     client = gspread.authorize(creds)
     sheet = client.open('PSA sales from Scratch') 
 
