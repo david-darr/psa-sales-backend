@@ -6,3 +6,4 @@ python-dotenv
 psycopg2-binary
 gunicorn
 gspread
+oauth2client
