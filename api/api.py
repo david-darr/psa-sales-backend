@@ -33,13 +33,12 @@ db = SQLAlchemy(app)
 ALL_SHEET_DATA = {}
 
 def load_all_sheets():
-    # Setup credentials and open the Google Sheet
     scope = ['https://spreadsheets.google.com/feeds', 'https://www.googleapis.com/auth/drive']
-    #service_account_info = json.loads(os.environ["GOOGLE_SERVICE_ACCOUNT_JSON"])
-    #creds = ServiceAccountCredentials.from_json_keyfile_dict(service_account_info, scope)
-    creds = ServiceAccountCredentials.from_json_keyfile_name('../school-lists-459815-3b5b11e369bc.json', scope)
+    service_account_info = json.loads(os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON"))
+    creds = ServiceAccountCredentials.from_json_keyfile_dict(service_account_info, scope)
     client = gspread.authorize(creds)
-    sheet = client.open('PSA sales from Scratch') 
+    sheet = client.open('PSA sales from Scratch')
+    print(repr(service_account_info["private_key"]))
 
     all_data = {}
     for worksheet in sheet.worksheets():
