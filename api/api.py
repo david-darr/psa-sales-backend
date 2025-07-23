@@ -41,7 +41,6 @@ def load_all_sheets():
     creds = ServiceAccountCredentials.from_json_keyfile_dict(service_account_info, scope)
     client = gspread.authorize(creds)
     sheet = client.open('PSA sales from Scratch')
-    print(repr(service_account_info["private_key"]))
 
     all_data = {}
     for worksheet in sheet.worksheets():
@@ -53,12 +52,16 @@ def load_all_sheets():
 # Load all sheets into memory at startup
 ALL_SHEET_DATA = load_all_sheets()
 
+GENERIC_NAMES = {"elementary", "preschool", "school name", "elementary school"}
+
 def get_all_sheet_school_names():
     excluded_names = set()
     for sheet_rows in ALL_SHEET_DATA.values():
         for row in sheet_rows:
             if row and row[0]:
-                excluded_names.add(normalize_name(row[0]))
+                norm = normalize_name(row[0])
+                if norm not in GENERIC_NAMES:
+                    excluded_names.add(norm)
     return excluded_names
 
 @app.route("/api/team-sheets", methods=["GET"])
