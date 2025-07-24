@@ -69,6 +69,12 @@ def get_team_sheets():
     # Returns all sheet data for frontend display
     return jsonify(ALL_SHEET_DATA)
 
+@app.route("/api/refresh-sheets", methods=["POST"])
+def refresh_sheets():
+    global ALL_SHEET_DATA
+    ALL_SHEET_DATA = load_all_sheets()
+    return jsonify({"status": "refreshed"})
+
 
 # ===== School List API =====
 class School(db.Model):
