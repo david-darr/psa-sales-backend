@@ -1,60 +1,54 @@
 import os
 import requests
+import re
+import json
+from itertools import permutations
+from math import radians, cos, sin, sqrt, atan2
+
 from flask import Flask, request, jsonify
 from flask_sqlalchemy import SQLAlchemy
 from flask_cors import CORS
 from dotenv import load_dotenv
-import re
-from itertools import permutations
-from math import radians, cos, sin, sqrt, atan2
+
 import gspread
-import json
 from oauth2client.service_account import ServiceAccountCredentials
 
-
-
-# ===== Start Up =====
-load_dotenv() # loads .env
+# ====== ENVIRONMENT & APP SETUP ======
+load_dotenv()
 GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
 
 app = Flask(__name__)
 CORS(app)
 
-
-
-# ===== SQL Database API =====
+# ====== DATABASE CONFIGURATION ======
 app.config['SQLALCHEMY_DATABASE_URI'] = (
     'postgresql://postgres.dlnfvtudzyyabixedniz:Pandaplayz6!@aws-0-us-east-1.pooler.supabase.com:6543/postgres'
 )
 db = SQLAlchemy(app)
 
-
-# === Global variable to store all sheets data ===
-ALL_SHEET_DATA = {}
-
+# ====== GOOGLE SHEETS LOADING ======
 def load_all_sheets():
+    """Load all worksheets from Google Sheets into a dictionary."""
     scope = ['https://spreadsheets.google.com/feeds', 'https://www.googleapis.com/auth/drive']
     service_account_json = os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON")
     service_account_info = json.loads(service_account_json)
-    # Always replace double-escaped newlines with real newlines
     service_account_info["private_key"] = service_account_info["private_key"].replace("\\n", "\n")
     creds = ServiceAccountCredentials.from_json_keyfile_dict(service_account_info, scope)
     client = gspread.authorize(creds)
     sheet = client.open('PSA sales from Scratch')
-
     all_data = {}
     for worksheet in sheet.worksheets():
-        # Get all values as a list of rows
         rows = worksheet.get_all_values()
         all_data[worksheet.title] = rows
     return all_data
 
-# Load all sheets into memory at startup
+# Cached sheet data (refreshed via endpoint)
 ALL_SHEET_DATA = load_all_sheets()
 
 GENERIC_NAMES = {"elementary", "preschool", "school name", "elementary school"}
 
 def get_all_sheet_school_names():
+    """Return a set of normalized school names from all sheets, excluding generic names."""
     excluded_names = set()
     for sheet_rows in ALL_SHEET_DATA.values():
         for row in sheet_rows:
@@ -64,19 +58,7 @@ def get_all_sheet_school_names():
                     excluded_names.add(norm)
     return excluded_names
 
-@app.route("/api/team-sheets", methods=["GET"])
-def get_team_sheets():
-    # Returns all sheet data for frontend display
-    return jsonify(ALL_SHEET_DATA)
-
-@app.route("/api/refresh-sheets", methods=["POST"])
-def refresh_sheets():
-    global ALL_SHEET_DATA
-    ALL_SHEET_DATA = load_all_sheets()
-    return jsonify({"status": "refreshed"})
-
-
-# ===== School List API =====
+# ====== DATABASE MODELS ======
 class School(db.Model):
     __tablename__ = 'schools'
     id = db.Column(db.Integer, primary_key=True)
@@ -86,7 +68,6 @@ class School(db.Model):
     contact = db.Column(db.String, nullable=False)
     email = db.Column(db.String, nullable=False)
 
-# Add models for the two other tables
 class HappyFeetSchool(db.Model):
     __tablename__ = 'Happy Feet Schools'
     id = db.Column(db.Integer, primary_key=True)
@@ -97,16 +78,7 @@ class PSASchool(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     name = db.Column(db.String, nullable=False)
 
-@app.route("/api/schools", methods=["GET"])
-def get_schools():
-    schools = School.query.all()
-    return jsonify([
-        {"id": s.id, "name": s.name, "address": s.address, "phone": s.phone, "contact": s.contact, "email": s.email}
-        for s in schools
-    ])
-
-
-# ===== School Finder API =====
+# ====== UTILITY FUNCTIONS ======
 def normalize_name(name):
     """Lowercase, remove non-alphanumeric, and extra spaces for fuzzy matching."""
     if not name:
@@ -116,8 +88,44 @@ def normalize_name(name):
     name = re.sub(r'\s+', ' ', name)
     return name.strip()
 
+def haversine(lat1, lng1, lat2, lng2):
+    """Calculate the great-circle distance between two points."""
+    R = 6371  # Earth radius in km
+    dlat = radians(lat2 - lat1)
+    dlng = radians(lng2 - lng1)
+    a = sin(dlat/2)**2 + cos(radians(lat1)) * cos(radians(lat2)) * sin(dlng/2)**2
+    c = 2 * atan2(sqrt(a), sqrt(1-a))
+    return R * c
+
+# ====== API ENDPOINTS ======
+
+# --- Sheets API ---
+@app.route("/api/team-sheets", methods=["GET"])
+def get_team_sheets():
+    """Return all sheet data for frontend display."""
+    return jsonify(ALL_SHEET_DATA)
+
+@app.route("/api/refresh-sheets", methods=["POST"])
+def refresh_sheets():
+    """Reload all sheets from Google Sheets."""
+    global ALL_SHEET_DATA
+    ALL_SHEET_DATA = load_all_sheets()
+    return jsonify({"status": "refreshed"})
+
+# --- School List API ---
+@app.route("/api/schools", methods=["GET"])
+def get_schools():
+    """Return all schools from the database."""
+    schools = School.query.all()
+    return jsonify([
+        {"id": s.id, "name": s.name, "address": s.address, "phone": s.phone, "contact": s.contact, "email": s.email}
+        for s in schools
+    ])
+
+# --- School Finder API ---
 @app.route("/api/find-schools", methods=["POST"])
 def find_schools():
+    """Find nearby schools not already in the database or sheets."""
     data = request.get_json()
     address = data.get("address")
     keywords = data.get("keywords", ["elementary school", "day care", "preschool", "kindercare", "montessori"])
@@ -168,7 +176,6 @@ def find_schools():
     for result in unique.values():
         school_name = result.get("name", "")
         norm_name = normalize_name(school_name)
-        # Exact or very close match (allow for minor variations)
         if any(norm_name == ex or norm_name in ex or ex in norm_name for ex in excluded_names):
             continue
         schools.append({
@@ -185,19 +192,10 @@ def find_schools():
         "google_api_key": GOOGLE_API_KEY
     })
 
-
-# ===== Route Planning API =====
-def haversine(lat1, lng1, lat2, lng2):
-    # Calculate the great-circle distance between two points
-    R = 6371  # Earth radius in km
-    dlat = radians(lat2 - lat1)
-    dlng = radians(lng2 - lng1)
-    a = sin(dlat/2)**2 + cos(radians(lat1)) * cos(radians(lat2)) * sin(dlng/2)**2
-    c = 2 * atan2(sqrt(a), sqrt(1-a))
-    return R * c
-
+# --- Route Planning API ---
 @app.route("/api/route-plan", methods=["POST"])
 def route_plan():
+    """Calculate shortest route visiting all selected schools."""
     data = request.get_json()
     schools = data.get("schools", [])
     start_address = data.get("start_address")
@@ -232,7 +230,6 @@ def route_plan():
     ]
 
     # Brute-force TSP starting from start location
-    from itertools import permutations
     indices = list(range(n))
     min_order = None
     min_dist = float('inf')
