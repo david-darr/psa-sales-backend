@@ -1,3 +1,5 @@
+# ===== IMPORTS ======
+
 import os
 import requests
 import re
@@ -13,6 +15,14 @@ from dotenv import load_dotenv
 import gspread
 from oauth2client.service_account import ServiceAccountCredentials
 
+from werkzeug.security import generate_password_hash, check_password_hash
+from flask_jwt_extended import (
+    JWTManager, create_access_token, jwt_required, get_jwt_identity
+)
+
+
+
+
 # ====== ENVIRONMENT & APP SETUP ======
 load_dotenv()
 GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
@@ -25,6 +35,10 @@ app.config['SQLALCHEMY_DATABASE_URI'] = (
     'postgresql://postgres.dlnfvtudzyyabixedniz:Pandaplayz6!@aws-0-us-east-1.pooler.supabase.com:6543/postgres'
 )
 db = SQLAlchemy(app)
+
+# ====== JWT AUTHENTICATION SETUP ======
+app.config["JWT_SECRET_KEY"] = os.getenv("JWT_SECRET_KEY")
+jwt = JWTManager(app)
 
 # ====== GOOGLE SHEETS LOADING ======
 def load_all_sheets():
@@ -78,6 +92,20 @@ class PSASchool(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     name = db.Column(db.String, nullable=False)
 
+# ====== USER MODELS ======
+class User(db.Model):
+    __tablename__ = 'users'
+    id = db.Column(db.Integer, primary_key=True)
+    name = db.Column(db.String, nullable=False)
+    email = db.Column(db.String, unique=True, nullable=False)
+    phone = db.Column(db.String, nullable=True)
+    password_hash = db.Column(db.String, nullable=False)
+
+    def set_password(self, password):
+        self.password_hash = generate_password_hash(password)
+    def check_password(self, password):
+        return check_password_hash(self.password_hash, password)
+
 # ====== UTILITY FUNCTIONS ======
 def normalize_name(name):
     """Lowercase, remove non-alphanumeric, and extra spaces for fuzzy matching."""
@@ -98,6 +126,47 @@ def haversine(lat1, lng1, lat2, lng2):
     return R * c
 
 # ====== API ENDPOINTS ======
+
+@app.route("/api/register", methods=["POST"])
+def register():
+    data = request.get_json()
+    name = data.get("name")
+    email = data.get("email")
+    phone = data.get("phone")
+    password = data.get("password")
+    if not all([name, email, password]):
+        return jsonify({"error": "Missing required fields"}), 400
+    if User.query.filter_by(email=email).first():
+        return jsonify({"error": "Email already registered"}), 400
+    user = User(name=name, email=email, phone=phone)
+    user.set_password(password)
+    db.session.add(user)
+    db.session.commit()
+    return jsonify({"message": "User registered successfully"})
+
+@app.route("/api/login", methods=["POST"])
+def login():
+    data = request.get_json()
+    email = data.get("email")
+    password = data.get("password")
+    user = User.query.filter_by(email=email).first()
+    if user and user.check_password(password):
+        access_token = create_access_token(identity=user.id)
+        return jsonify({
+            "access_token": access_token,
+            "user": {"id": user.id, "name": user.name, "email": user.email, "phone": user.phone}
+        })
+    return jsonify({"error": "Invalid credentials"}), 401
+
+@app.route("/api/profile", methods=["GET"])
+@jwt_required()
+def profile():
+    user_id = get_jwt_identity()
+    user = User.query.get(user_id)
+    if not user:
+        return jsonify({"error": "User not found"}), 404
+    return jsonify({"id": user.id, "name": user.name, "email": user.email, "phone": user.phone})
+
 
 # --- Sheets API ---
 @app.route("/api/team-sheets", methods=["GET"])

@@ -7,3 +7,5 @@ psycopg2-binary
 gunicorn
 gspread
 oauth2client
+Flask-JWT-Extended
+Werkzeug
