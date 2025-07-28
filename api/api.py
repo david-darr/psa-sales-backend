@@ -28,7 +28,11 @@ load_dotenv()
 GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
 
 app = Flask(__name__)
-CORS(app, supports_credentials=True, origins=["https://psasales.com"])
+CORS(app, supports_credentials=True, origins=[
+    "https://psasales-6l22ucils-david-darrs-projects.vercel.app",
+    "https://www.salespsa.com",
+    "https://salespsa.com"
+])
 
 # ====== DATABASE CONFIGURATION ======
 app.config['SQLALCHEMY_DATABASE_URI'] = (
