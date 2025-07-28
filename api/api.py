@@ -28,7 +28,7 @@ load_dotenv()
 GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
 
 app = Flask(__name__)
-CORS(app)
+CORS(app, supports_credentials=True, origins=["https://psasales.com"])
 
 # ====== DATABASE CONFIGURATION ======
 app.config['SQLALCHEMY_DATABASE_URI'] = (
@@ -163,6 +163,7 @@ def login():
 @app.route("/api/profile", methods=["GET"])
 @jwt_required()
 def profile():
+    print("Request headers:", dict(request.headers))  # Add this line
     user_id = get_jwt_identity()
     user = User.query.get(user_id)
     if not user:
