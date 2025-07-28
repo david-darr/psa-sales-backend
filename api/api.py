@@ -14,6 +14,8 @@ from dotenv import load_dotenv
 
 import gspread
 from oauth2client.service_account import ServiceAccountCredentials
+from google.oauth2 import id_token
+from google.auth.transport import requests as google_requests
 
 from werkzeug.security import generate_password_hash, check_password_hash
 from flask_jwt_extended import (
@@ -174,6 +176,32 @@ def profile():
         return jsonify({"error": "User not found"}), 404
     return jsonify({"id": user.id, "name": user.name, "email": user.email, "phone": user.phone})
 
+@app.route("/api/google-login", methods=["POST"])
+def google_login():
+    data = request.get_json()
+    token = data.get("token")
+    if not token:
+        return jsonify({"error": "Missing Google token"}), 400
+    try:
+        # Specify the CLIENT_ID of the app that accesses the backend
+        GOOGLE_CLIENT_ID = os.getenv("GOOGLE_CLIENT_ID")
+        idinfo = id_token.verify_oauth2_token(token, google_requests.Request(), GOOGLE_CLIENT_ID)
+        email = idinfo["email"]
+        name = idinfo.get("name", email.split("@")[0])
+        # Find or create user
+        user = User.query.filter_by(email=email).first()
+        if not user:
+            user = User(name=name, email=email, phone=None, password_hash="")  # No password for Google users
+            db.session.add(user)
+            db.session.commit()
+        access_token = create_access_token(identity=str(user.id))
+        return jsonify({
+            "access_token": access_token,
+            "user": {"id": user.id, "name": user.name, "email": user.email, "phone": user.phone}
+        })
+    except Exception as e:
+        print("Google login error:", e)
+        return jsonify({"error": "Invalid Google token"}), 400
 
 # --- Sheets API ---
 @app.route("/api/team-sheets", methods=["GET"])
