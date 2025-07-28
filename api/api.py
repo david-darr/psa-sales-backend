@@ -38,6 +38,7 @@ db = SQLAlchemy(app)
 
 # ====== JWT AUTHENTICATION SETUP ======
 app.config["JWT_SECRET_KEY"] = os.getenv("JWT_SECRET_KEY")
+print("JWT_SECRET_KEY loaded:", repr(app.config["JWT_SECRET_KEY"]))  # Add this line
 jwt = JWTManager(app)
 
 # ====== GOOGLE SHEETS LOADING ======
