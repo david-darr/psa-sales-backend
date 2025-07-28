@@ -17,6 +17,10 @@ import gspread
 from oauth2client.service_account import ServiceAccountCredentials
 from google.oauth2 import id_token
 from google.auth.transport import requests as google_requests
+from googleapiclient.discovery import build
+from google.oauth2.credentials import Credentials
+import base64
+from email.mime.text import MIMEText
 
 from werkzeug.security import generate_password_hash, check_password_hash
 from flask_jwt_extended import (
@@ -109,6 +113,8 @@ class User(db.Model):
     email = db.Column(db.String, unique=True, nullable=False)
     phone = db.Column(db.String, nullable=True)
     password_hash = db.Column(db.String, nullable=False)
+    gmail_access_token = db.Column(db.String, nullable=True)      # <-- Add this
+    gmail_refresh_token = db.Column(db.String, nullable=True)     # <-- And this
 
     def set_password(self, password):
         self.password_hash = generate_password_hash(password)
@@ -142,6 +148,25 @@ def haversine(lat1, lng1, lat2, lng2):
     a = sin(dlat/2)**2 + cos(radians(lat1)) * cos(radians(lat2)) * sin(dlng/2)**2
     c = 2 * atan2(sqrt(a), sqrt(1-a))
     return R * c
+
+def send_gmail(user, to_email, subject, body):
+    creds = Credentials(
+        token=user.gmail_access_token,
+        refresh_token=user.gmail_refresh_token,
+        token_uri="https://oauth2.googleapis.com/token",
+        client_id=os.getenv("GOOGLE_CLIENT_ID"),
+        client_secret=os.getenv("GOOGLE_CLIENT_SECRET"),
+        scopes=["https://www.googleapis.com/auth/gmail.send"]
+    )
+    service = build('gmail', 'v1', credentials=creds)
+    message = MIMEText(body)
+    message['to'] = to_email
+    message['from'] = user.email
+    message['subject'] = subject
+    raw = base64.urlsafe_b64encode(message.as_bytes()).decode()
+    send_message = {'raw': raw}
+    sent = service.users().messages().send(userId="me", body=send_message).execute()
+    return sent
 
 # ====== API ENDPOINTS ======
 
@@ -190,23 +215,28 @@ def profile():
 def google_login():
     data = request.get_json()
     token = data.get("token")
+    access_token = data.get("access_token")  # <-- Get access_token from frontend
+    refresh_token = data.get("refresh_token")  # <-- Get refresh_token from frontend
     if not token:
         return jsonify({"error": "Missing Google token"}), 400
     try:
-        # Specify the CLIENT_ID of the app that accesses the backend
         GOOGLE_CLIENT_ID = os.getenv("GOOGLE_CLIENT_ID")
         idinfo = id_token.verify_oauth2_token(token, google_requests.Request(), GOOGLE_CLIENT_ID)
         email = idinfo["email"]
         name = idinfo.get("name", email.split("@")[0])
-        # Find or create user
         user = User.query.filter_by(email=email).first()
         if not user:
             user = User(name=name, email=email, phone=None, password_hash="")  # No password for Google users
             db.session.add(user)
-            db.session.commit()
-        access_token = create_access_token(identity=str(user.id))
+        # Always update tokens if present
+        if access_token:
+            user.gmail_access_token = access_token
+        if refresh_token:
+            user.gmail_refresh_token = refresh_token
+        db.session.commit()
+        access_token_jwt = create_access_token(identity=str(user.id))
         return jsonify({
-            "access_token": access_token,
+            "access_token": access_token_jwt,
             "user": {"id": user.id, "name": user.name, "email": user.email, "phone": user.phone}
         })
     except Exception as e:
@@ -378,8 +408,8 @@ def send_email():
 
     user_id = get_jwt_identity()
     user = User.query.get(user_id)
-    if not user:
-        return jsonify({"error": "User not found"}), 404
+    if not user or not user.gmail_access_token:
+        return jsonify({"error": "User not connected with Gmail"}), 400
 
     # Render the email body from the template
     body = render_template_string(
@@ -389,14 +419,8 @@ def send_email():
         school_email=recipient
     )
 
-    msg = Message(
-        subject="Let's Connect! PSA Programs",
-        recipients=[recipient],
-        body=body,
-        reply_to=user.email
-    )
     try:
-        mail.send(msg)
+        send_gmail(user, recipient, "Let's Connect! PSA Programs", body)
         return jsonify({"status": "sent"})
     except Exception as e:
         return jsonify({"error": str(e)}), 500

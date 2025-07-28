@@ -11,3 +11,6 @@ Flask-JWT-Extended
 Werkzeug
 google-auth
 Flask-Mail
+google-api-python-client
+google-auth-httplib2
+google-auth-oauthlib
