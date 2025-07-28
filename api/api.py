@@ -44,7 +44,6 @@ db = SQLAlchemy(app)
 
 # ====== JWT AUTHENTICATION SETUP ======
 app.config["JWT_SECRET_KEY"] = os.getenv("JWT_SECRET_KEY")
-print("JWT_SECRET_KEY loaded:", repr(app.config["JWT_SECRET_KEY"]))  # Add this line
 jwt = JWTManager(app)
 
 # ====== GOOGLE SHEETS LOADING ======
@@ -169,7 +168,6 @@ def login():
 @app.route("/api/profile", methods=["GET"])
 @jwt_required()
 def profile():
-    print("Request headers:", dict(request.headers))  # Add this line
     user_id = get_jwt_identity()
     user = User.query.get(user_id)
     if not user:
@@ -240,8 +238,6 @@ def find_schools():
     happy_feet_names = set([normalize_name(s.name) for s in HappyFeetSchool.query.all()])
     psa_names = set([normalize_name(s.name) for s in PSASchool.query.all()])
     excluded_names = happy_feet_names | psa_names | get_all_sheet_school_names()
-
-    print("Excluded schools:", excluded_names)
 
     # Geocode the address
     geo_url = f"https://maps.googleapis.com/maps/api/geocode/json"
