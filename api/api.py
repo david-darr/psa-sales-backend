@@ -408,15 +408,44 @@ We would love to connect with {{ school_email }} about our programs.
 Best regards,
 {{ user_name }}
 {{ user_email }}
+
+Hi [Director/Administrator's Name],
+
+My name is {{ user_name }}, and I'm with The Players Sports Academy (PSA) — a nonprofit organization offering fun, convenient sports activities for preschool students ages 2-5 right on campus during the school day. It was a pleasure visiting [School Name] recently! I dropped off a folder at the front desk outlining our on-site sports programs, and I hope it made its way to you. For your convenience, I've also attached a copy of the flyer.
+PSA TOTS currently works with over 60 preschools in the Northern Virginia area, providing quality sports programs designed specifically for young learners.
+Here's why schools and families love working with PSA:
+On-site convenience - Programs run during school hours with no extra work for your team.
+
+
+All equipment provided - I bring everything needed for each session.
+
+
+Flexible scheduling - Programs available seasonally or year-round.
+
+
+Variety of activities - we offer Soccer, Basketball, T-Ball, and Yoga designed specifically for young learners.
+
+
+Fundraising opportunity - we offer schools the chance to raise funds through the programs.
+
+
+We would love to set up a free demo session so your students can experience the fun firsthand!
+Would you be open to a quick call or meeting to discuss the details? Please let me know a date and time that works best for you, and I’ll be sure to accommodate.
+Thank you for your time, and I look forward to the opportunity to work together!
+
+Best regards,
+ {{ user_name }}
+ Sales Associate and Coach
+ [Phone Number] | {{ user_email }}
+ https://thepsasports.com
 """
 
 @app.route("/api/send-email", methods=["POST"])
 @jwt_required()
 def send_email():
-    app.logger.info("Headers: %s", dict(request.headers))
-    app.logger.info("JSON: %s", request.get_json())
     data = request.get_json()
     recipient = data.get("recipient")
+    subject = data.get("subject", "Let's Connect! PSA Programs")  # Default subject
     if not recipient:
         return jsonify({"error": "Missing recipient"}), 400
 
@@ -425,7 +454,6 @@ def send_email():
     if not user or not user.gmail_access_token:
         return jsonify({"error": "User not connected with Gmail"}), 400
 
-    # Render the email body from the template
     body = render_template_string(
         EMAIL_TEMPLATE,
         user_name=user.name,
@@ -434,7 +462,7 @@ def send_email():
     )
 
     try:
-        send_gmail(user, recipient, "Let's Connect! PSA Programs", body)
+        send_gmail(user, recipient, subject, body)
         return jsonify({"status": "sent"})
     except Exception as e:
         return jsonify({"error": str(e)}), 500
