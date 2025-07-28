@@ -413,8 +413,8 @@ Best regards,
 @app.route("/api/send-email", methods=["POST"])
 @jwt_required()
 def send_email():
-    print("Headers:", dict(request.headers))           # <--- Add this
-    print("JSON:", request.get_json())                 # <--- And this
+    app.logger.info("Headers: %s", dict(request.headers))
+    app.logger.info("JSON: %s", request.get_json())
     data = request.get_json()
     recipient = data.get("recipient")
     if not recipient:
