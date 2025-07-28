@@ -214,34 +214,46 @@ def profile():
 @app.route("/api/google-login", methods=["POST"])
 def google_login():
     data = request.get_json()
-    token = data.get("token")
-    access_token = data.get("access_token")  # <-- Get access_token from frontend
-    refresh_token = data.get("refresh_token")  # <-- Get refresh_token from frontend
-    if not token:
-        return jsonify({"error": "Missing Google token"}), 400
-    try:
-        GOOGLE_CLIENT_ID = os.getenv("GOOGLE_CLIENT_ID")
-        idinfo = id_token.verify_oauth2_token(token, google_requests.Request(), GOOGLE_CLIENT_ID)
-        email = idinfo["email"]
-        name = idinfo.get("name", email.split("@")[0])
-        user = User.query.filter_by(email=email).first()
-        if not user:
-            user = User(name=name, email=email, phone=None, password_hash="")  # No password for Google users
-            db.session.add(user)
-        # Always update tokens if present
-        if access_token:
-            user.gmail_access_token = access_token
-        if refresh_token:
-            user.gmail_refresh_token = refresh_token
-        db.session.commit()
-        access_token_jwt = create_access_token(identity=str(user.id))
-        return jsonify({
-            "access_token": access_token_jwt,
-            "user": {"id": user.id, "name": user.name, "email": user.email, "phone": user.phone}
-        })
-    except Exception as e:
-        print("Google login error:", e)
-        return jsonify({"error": "Invalid Google token"}), 400
+    code = data.get("code")  # <-- use 'code' instead of 'token'
+    if not code:
+        return jsonify({"error": "Missing Google auth code"}), 400
+
+    # Exchange code for tokens
+    client_id = os.getenv("GOOGLE_CLIENT_ID")
+    client_secret = os.getenv("GOOGLE_CLIENT_SECRET")
+    redirect_uri = "postmessage"  # for SPA
+
+    token_url = "https://oauth2.googleapis.com/token"
+    token_data = {
+        "code": code,
+        "client_id": client_id,
+        "client_secret": client_secret,
+        "redirect_uri": redirect_uri,
+        "grant_type": "authorization_code"
+    }
+    token_resp = requests.post(token_url, data=token_data)
+    if not token_resp.ok:
+        return jsonify({"error": "Failed to exchange code"}), 400
+    tokens = token_resp.json()
+    access_token = tokens.get("access_token")
+    refresh_token = tokens.get("refresh_token")
+    from google.auth.transport.requests import Request as GoogleRequest
+    from google.oauth2 import id_token
+    idinfo = id_token.verify_oauth2_token(tokens["id_token"], GoogleRequest(), client_id)
+    email = idinfo["email"]
+    name = idinfo.get("name", email.split("@")[0])
+    user = User.query.filter_by(email=email).first()
+    if not user:
+        user = User(name=name, email=email, phone=None, password_hash="")
+        db.session.add(user)
+    user.gmail_access_token = access_token
+    user.gmail_refresh_token = refresh_token
+    db.session.commit()
+    access_token_jwt = create_access_token(identity=str(user.id))
+    return jsonify({
+        "access_token": access_token_jwt,
+        "user": {"id": user.id, "name": user.name, "email": user.email, "phone": user.phone}
+    })
 
 # --- Sheets API ---
 @app.route("/api/team-sheets", methods=["GET"])
