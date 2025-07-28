@@ -127,6 +127,7 @@ def haversine(lat1, lng1, lat2, lng2):
 
 # ====== API ENDPOINTS ======
 
+# --- USER API ---
 @app.route("/api/register", methods=["POST"])
 def register():
     data = request.get_json()
