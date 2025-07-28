@@ -400,18 +400,9 @@ def route_plan():
 
 # --- Email API ---
 EMAIL_TEMPLATE = """
-Hello,
-
-My name is {{ user_name }} and I am reaching out from PSA. 
-We would love to connect with {{ school_email }} about our programs.
-
-Best regards,
-{{ user_name }}
-{{ user_email }}
-
 Hi [Director/Administrator's Name],
 
-My name is {{ user_name }}, and I'm with The Players Sports Academy (PSA) — a nonprofit organization offering fun, convenient sports activities for preschool students ages 2-5 right on campus during the school day. It was a pleasure visiting [School Name] recently! I dropped off a folder at the front desk outlining our on-site sports programs, and I hope it made its way to you. For your convenience, I've also attached a copy of the flyer.
+My name is {{ user_name }}, and I'm with The Players Sports Academy (PSA) — a nonprofit organization offering fun, convenient sports activities for preschool students ages 2-5 right on campus during the school day. It was a pleasure visiting {{ school_name }} recently! I dropped off a folder at the front desk outlining our on-site sports programs, and I hope it made its way to you. For your convenience, I've also attached a copy of the flyer.
 PSA TOTS currently works with over 60 preschools in the Northern Virginia area, providing quality sports programs designed specifically for young learners.
 Here's why schools and families love working with PSA:
 On-site convenience - Programs run during school hours with no extra work for your team.
@@ -445,7 +436,8 @@ Best regards,
 def send_email():
     data = request.get_json()
     recipient = data.get("recipient")
-    subject = data.get("subject", "Let's Connect! PSA Programs")  # Default subject
+    subject = data.get("subject", "Let's Connect! PSA Programs")
+    school_name = data.get("school_name", "")
     if not recipient:
         return jsonify({"error": "Missing recipient"}), 400
 
@@ -458,7 +450,8 @@ def send_email():
         EMAIL_TEMPLATE,
         user_name=user.name,
         user_email=user.email,
-        school_email=recipient
+        school_email=recipient,
+        school_name=school_name
     )
 
     try:
