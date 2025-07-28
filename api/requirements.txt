@@ -10,3 +10,4 @@ oauth2client
 Flask-JWT-Extended
 Werkzeug
 google-auth
+Flask-Mail

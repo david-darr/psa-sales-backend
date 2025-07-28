@@ -7,7 +7,8 @@ import json
 from itertools import permutations
 from math import radians, cos, sin, sqrt, atan2
 
-from flask import Flask, request, jsonify
+from flask import Flask, request, jsonify, render_template_string
+from flask_mail import Mail, Message
 from flask_sqlalchemy import SQLAlchemy
 from flask_cors import CORS
 from dotenv import load_dotenv
@@ -21,6 +22,8 @@ from werkzeug.security import generate_password_hash, check_password_hash
 from flask_jwt_extended import (
     JWTManager, create_access_token, jwt_required, get_jwt_identity
 )
+
+
 
 
 
@@ -111,6 +114,15 @@ class User(db.Model):
         self.password_hash = generate_password_hash(password)
     def check_password(self, password):
         return check_password_hash(self.password_hash, password)
+
+# ====== MAIL CONFIGURATION ======
+app.config['MAIL_SERVER'] = 'smtp.gmail.com'  # or your SMTP server
+app.config['MAIL_PORT'] = 587
+app.config['MAIL_USE_TLS'] = True
+app.config['MAIL_USERNAME'] = os.getenv("MAIL_USERNAME")  # your server email
+app.config['MAIL_PASSWORD'] = os.getenv("MAIL_PASSWORD")  # your server email password or app password
+app.config['MAIL_DEFAULT_SENDER'] = os.getenv("MAIL_USERNAME")
+mail = Mail(app)
 
 # ====== UTILITY FUNCTIONS ======
 def normalize_name(name):
@@ -342,5 +354,51 @@ def route_plan():
 
     route = [schools[i]["place_id"] for i in min_order]
     return jsonify({"route": route})
+
+
+# --- Email API ---
+EMAIL_TEMPLATE = """
+Hello,
+
+My name is {{ user_name }} and I am reaching out from PSA. 
+We would love to connect with {{ school_email }} about our programs.
+
+Best regards,
+{{ user_name }}
+{{ user_email }}
+"""
+
+@app.route("/api/send-email", methods=["POST"])
+@jwt_required()
+def send_email():
+    data = request.get_json()
+    recipient = data.get("recipient")
+    if not recipient:
+        return jsonify({"error": "Missing recipient"}), 400
+
+    user_id = get_jwt_identity()
+    user = User.query.get(user_id)
+    if not user:
+        return jsonify({"error": "User not found"}), 404
+
+    # Render the email body from the template
+    body = render_template_string(
+        EMAIL_TEMPLATE,
+        user_name=user.name,
+        user_email=user.email,
+        school_email=recipient
+    )
+
+    msg = Message(
+        subject="Let's Connect! PSA Programs",
+        recipients=[recipient],
+        body=body,
+        reply_to=user.email
+    )
+    try:
+        mail.send(msg)
+        return jsonify({"status": "sent"})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 
 
