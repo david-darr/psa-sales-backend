@@ -113,8 +113,8 @@ class User(db.Model):
     email = db.Column(db.String, unique=True, nullable=False)
     phone = db.Column(db.String, nullable=True)
     password_hash = db.Column(db.String, nullable=False)
-    gmail_access_token = db.Column(db.String, nullable=True)      # <-- Add this
-    gmail_refresh_token = db.Column(db.String, nullable=True)     # <-- And this
+    gmail_access_token = db.Column(db.String, nullable=True)      
+    gmail_refresh_token = db.Column(db.String, nullable=True)     
 
     def set_password(self, password):
         self.password_hash = generate_password_hash(password)
