@@ -171,12 +171,14 @@ def send_gmail(user, to_email, subject, body):
 def geocode_address(address):
     if not address:
         return None, None
-    geo_url = "https://maps.googleapis.com/maps/api/geocode/json"
-    params = {"address": address, "key": GOOGLE_API_KEY}
-    resp = requests.get(geo_url, params=params).json()
-    if resp["results"]:
-        loc = resp["results"][0]["geometry"]["location"]
-        return loc["lat"], loc["lng"]
+    HERE_API_KEY = os.getenv("HERE_API_KEY")
+    url = "https://geocode.search.hereapi.com/v1/geocode"
+    params = {"q": address, "apiKey": HERE_API_KEY, "limit": 1}
+    resp = requests.get(url, params=params).json()
+    items = resp.get("items")
+    if items:
+        position = items[0]["position"]
+        return position["lat"], position["lng"]
     return None, None
 
 # ====== API ENDPOINTS ======
@@ -305,12 +307,10 @@ def find_schools():
     excluded_names = happy_feet_names | psa_names | get_all_sheet_school_names()
 
     # Geocode the address
-    geo_url = f"https://maps.googleapis.com/maps/api/geocode/json"
-    geo_params = {"address": address, "key": GOOGLE_API_KEY}
-    geo_resp = requests.get(geo_url, params=geo_params).json()
-    if not geo_resp["results"]:
+    lat, lng = geocode_address(address)
+    if lat is None or lng is None:
         return jsonify({"error": "Address not found"}), 404
-    location = geo_resp["results"][0]["geometry"]["location"]
+    location = {"lat": lat, "lng": lng}
 
     # Find nearby schools using Places API
     places_url = "https://maps.googleapis.com/maps/api/place/nearbysearch/json"
@@ -370,13 +370,9 @@ def route_plan():
         return jsonify({"error": "No starting address provided"}), 400
 
     # Geocode the starting address
-    geo_url = f"https://maps.googleapis.com/maps/api/geocode/json"
-    geo_params = {"address": start_address, "key": GOOGLE_API_KEY}
-    geo_resp = requests.get(geo_url, params=geo_params).json()
-    if not geo_resp["results"]:
+    start_lat, start_lng = geocode_address(start_address)
+    if start_lat is None or start_lng is None:
         return jsonify({"error": "Starting address not found"}), 404
-    start_location = geo_resp["results"][0]["geometry"]["location"]
-    start_lat, start_lng = start_location["lat"], start_location["lng"]
 
     # Build distance matrix (from start to each school, and between schools)
     n = len(schools)
