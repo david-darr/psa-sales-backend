@@ -461,3 +461,28 @@ def send_email():
         return jsonify({"error": str(e)}), 500
 
 
+# --- MAP API ---
+@app.route("/api/map-schools", methods=["GET"])
+def map_schools():
+    # Schools already in (HappyFeet + PSA)
+    happy_feet = [
+        {"name": s.name, "type": "happyfeet"}
+        for s in HappyFeetSchool.query.all()
+    ]
+    psa = [
+        {"name": s.name, "type": "psa"}
+        for s in PSASchool.query.all()
+    ]
+    # Schools reached out to (from Google Sheets)
+    reached_out = []
+    for sheet_rows in ALL_SHEET_DATA.values():
+        for row in sheet_rows[1:]:  # skip header
+            if row and row[0]:
+                reached_out.append({"name": row[0], "type": "sheet"})
+    return jsonify({
+        "happyfeet": happy_feet,
+        "psa": psa,
+        "reached_out": reached_out
+    })
+
+
