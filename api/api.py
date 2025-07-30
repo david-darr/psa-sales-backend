@@ -212,6 +212,7 @@ def split_sheet_schools(sheet_rows):
             happy_feet.append({"name": name, "address": address})
     return psa_preschools, happy_feet
 
+
 # ====== API ENDPOINTS ======
 
 # --- USER API ---
@@ -509,22 +510,45 @@ def refresh_map_schools():
     new_sheet_rows = load_PSA_school_sheet()
     psa_preschools, happy_feet = split_sheet_schools(new_sheet_rows)
 
-    happy_feet_geocoded = geocode_school_list(happy_feet, "happyfeet")
-    psa_preschools_geocoded = geocode_school_list(psa_preschools, "psa")
+    # Geocode HappyFeet schools
+    happy_feet_geocoded = []
+    for s in happy_feet:
+        lat, lng = geocode_address(s["address"])
+        happy_feet_geocoded.append({
+            "name": s["name"],
+            "type": "happyfeet",
+            "lat": lat,
+            "lng": lng
+        })
+
+    # Geocode PSA Preschools
+    psa_preschools_geocoded = []
+    for s in psa_preschools:
+        lat, lng = geocode_address(s["address"])
+        psa_preschools_geocoded.append({
+            "name": s["name"],
+            "type": "psa",
+            "lat": lat,
+            "lng": lng
+        })
 
     # Geocode reached_out schools from ALL_SHEET_DATA, ensure address is present and not blank
-    reached_out_raw = []
+    reached_out_geocoded = []
     for sheet_rows in ALL_SHEET_DATA.values():
         for row in sheet_rows[1:]:
-            # Use column 7 (index 6) for address, skip if missing or blank
             if len(row) > 6 and row[0] and str(row[6]).strip():
-                reached_out_raw.append({"name": row[0], "address": str(row[6]).strip()})
-    reached_out = geocode_school_list(reached_out_raw, "sheet")
+                lat, lng = geocode_address(str(row[6]).strip())
+                reached_out_geocoded.append({
+                    "name": row[0],
+                    "type": "sheet",
+                    "lat": lat,
+                    "lng": lng
+                })
 
     MAP_SCHOOL_CACHE = {
         "happyfeet": happy_feet_geocoded,
         "psa": psa_preschools_geocoded,
-        "reached_out": reached_out
+        "reached_out": reached_out_geocoded
     }
     return jsonify({"status": "refreshed"})
 
