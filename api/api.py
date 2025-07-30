@@ -473,11 +473,18 @@ def send_email():
 
 
 # --- MAP API ---
+MAP_SCHOOL_CACHE = {}
+
 @app.route("/api/map-schools", methods=["GET"])
 def map_schools():
+    return jsonify(MAP_SCHOOL_CACHE)
+
+@app.route("/api/refresh-map-schools", methods=["POST"])
+def refresh_map_schools():
+    global MAP_SCHOOL_CACHE
+    # Your existing geocoding logic here, but save results to MAP_SCHOOL_CACHE
     happy_feet = []
     for s in HappyFeetSchool.query.all():
-        # If you have address, use it; otherwise, skip lat/lng
         lat, lng = geocode_address(getattr(s, "address", None))
         happy_feet.append({
             "name": s.name,
@@ -496,10 +503,10 @@ def map_schools():
         })
     reached_out = []
     for sheet_rows in ALL_SHEET_DATA.values():
-        for row in sheet_rows[1:]:  
+        for row in sheet_rows[1:]:
             if row and row[0]:
                 school_name = row[0]
-                address = row[6] if len(row) > 6 else None  
+                address = row[6] if len(row) > 6 else None
                 lat, lng = geocode_address(address)
                 reached_out.append({
                     "name": school_name,
@@ -507,10 +514,11 @@ def map_schools():
                     "lat": lat,
                     "lng": lng
                 })
-    return jsonify({
+    MAP_SCHOOL_CACHE = {
         "happyfeet": happy_feet,
         "psa": psa,
         "reached_out": reached_out
-    })
+    }
+    return jsonify({"status": "refreshed"})
 
 
