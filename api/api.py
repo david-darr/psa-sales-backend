@@ -477,7 +477,9 @@ def map_schools():
 
 @app.route("/api/refresh-map-schools", methods=["POST"])
 def refresh_map_schools():
-    global MAP_SCHOOL_CACHE
+    global MAP_SCHOOL_CACHE, ALL_SHEET_DATA
+    # Refresh Google Sheets data first
+    ALL_SHEET_DATA = load_all_sheets()
     # Commented out HappyFeet and PSA geocoding for now
     # happy_feet = []
     # for s in HappyFeetSchool.query.all():
