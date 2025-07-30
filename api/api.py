@@ -478,25 +478,25 @@ def map_schools():
 @app.route("/api/refresh-map-schools", methods=["POST"])
 def refresh_map_schools():
     global MAP_SCHOOL_CACHE
-    # Your existing geocoding logic here, but save results to MAP_SCHOOL_CACHE
-    happy_feet = []
-    for s in HappyFeetSchool.query.all():
-        lat, lng = geocode_address(getattr(s, "address", None))
-        happy_feet.append({
-            "name": s.name,
-            "type": "happyfeet",
-            "lat": lat,
-            "lng": lng
-        })
-    psa = []
-    for s in PSASchool.query.all():
-        lat, lng = geocode_address(getattr(s, "address", None))
-        psa.append({
-            "name": s.name,
-            "type": "psa",
-            "lat": lat,
-            "lng": lng
-        })
+    # Commented out HappyFeet and PSA geocoding for now
+    # happy_feet = []
+    # for s in HappyFeetSchool.query.all():
+    #     lat, lng = geocode_address(getattr(s, "address", None))
+    #     happy_feet.append({
+    #         "name": s.name,
+    #         "type": "happyfeet",
+    #         "lat": lat,
+    #         "lng": lng
+    #     })
+    # psa = []
+    # for s in PSASchool.query.all():
+    #     lat, lng = geocode_address(getattr(s, "address", None))
+    #     psa.append({
+    #         "name": s.name,
+    #         "type": "psa",
+    #         "lat": lat,
+    #         "lng": lng
+    #     })
     reached_out = []
     for sheet_rows in ALL_SHEET_DATA.values():
         for row in sheet_rows[1:]:
@@ -511,8 +511,8 @@ def refresh_map_schools():
                     "lng": lng
                 })
     MAP_SCHOOL_CACHE = {
-        "happyfeet": happy_feet,
-        "psa": psa,
+        # "happyfeet": happy_feet,
+        # "psa": psa,
         "reached_out": reached_out
     }
     return jsonify({"status": "refreshed"})
