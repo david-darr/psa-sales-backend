@@ -518,7 +518,8 @@ def map_schools():
 @app.route("/api/refresh-map-schools", methods=["POST"])
 def refresh_map_schools():
     global MAP_SCHOOL_CACHE
-    psa_preschools, happy_feet = split_sheet_schools(load_all_sheets())
+    new_sheet_rows = load_PSA_school_sheet()
+    psa_preschools, happy_feet = split_sheet_schools(new_sheet_rows)
 
     happy_feet_geocoded = []
     for s in happy_feet:
