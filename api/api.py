@@ -54,6 +54,7 @@ app.config["JWT_SECRET_KEY"] = os.getenv("JWT_SECRET_KEY")
 jwt = JWTManager(app)
 
 # ====== GOOGLE SHEETS LOADING ======
+# Sheet of Sales Schools
 def load_all_sheets():
     """Load all worksheets from Google Sheets into a dictionary."""
     scope = ['https://spreadsheets.google.com/feeds', 'https://www.googleapis.com/auth/drive']
@@ -69,8 +70,56 @@ def load_all_sheets():
         all_data[worksheet.title] = rows
     return all_data
 
+# Sheet of Happy Feet and PSA Schools
+def load_PSA_school_sheet():
+    """Load the new Google Sheet for PSA Preschools and Happy Feet."""
+    scope = ['https://spreadsheets.google.com/feeds', 'https://www.googleapis.com/auth/drive']
+    service_account_json = os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON")
+    service_account_info = json.loads(service_account_json)
+    service_account_info["private_key"] = service_account_info["private_key"].replace("\\n", "\n")
+    creds = ServiceAccountCredentials.from_json_keyfile_dict(service_account_info, scope)
+    client = gspread.authorize(creds)
+    sheet = client.open('PSA Preschools')  # <-- change to your new sheet name
+    worksheet = sheet.sheet1
+    rows = worksheet.get_all_values()
+    return rows
+
+def split_sheet_schools(sheet_rows):
+    """
+    Splits sheet rows into PSA Preschools and Happy Feet schools based on indicator rows.
+    PSA Preschools: column 2 is name, column 14 is address.
+    Happy Feet: column 2 is name, column 15 is address.
+    """
+    psa_preschools = []
+    happy_feet = []
+    mode = None  # None, "psa", "happyfeet"
+    for row in sheet_rows:
+        if len(row) < 15:
+            continue
+        indicator = str(row[1]).strip().lower()
+        if indicator == "northern virginia (psa)":
+            mode = "psa"
+            continue
+        elif indicator == "northern virginia (happyfeet)":
+            mode = "happyfeet"
+            continue
+        if mode == "psa":
+            name = str(row[1]).strip()
+            address = str(row[13]).strip()
+            if not name or not address or name.lower() in {"school name", "elementary", "preschool"}:
+                continue
+            psa_preschools.append({"name": name, "address": address})
+        elif mode == "happyfeet":
+            name = str(row[1]).strip()
+            address = str(row[14]).strip()
+            if not name or not address or name.lower() in {"school name", "elementary", "preschool"}:
+                continue
+            happy_feet.append({"name": name, "address": address})
+    return psa_preschools, happy_feet
+
 # Cached sheet data (refreshed via endpoint)
 ALL_SHEET_DATA = load_all_sheets()
+psa_preschools, happy_feet = split_sheet_schools(load_all_sheets())
 
 GENERIC_NAMES = {"elementary", "preschool", "school name", "elementary school"}
 
@@ -85,6 +134,7 @@ def get_all_sheet_school_names():
                     excluded_names.add(norm)
     return excluded_names
 
+
 # ====== DATABASE MODELS ======
 class School(db.Model):
     __tablename__ = 'schools'
@@ -94,16 +144,6 @@ class School(db.Model):
     phone = db.Column(db.String, nullable=False)
     contact = db.Column(db.String, nullable=False)
     email = db.Column(db.String, nullable=False)
-
-class HappyFeetSchool(db.Model):
-    __tablename__ = 'Happy Feet Schools'
-    id = db.Column(db.Integer, primary_key=True)
-    name = db.Column(db.String, nullable=False)
-
-class PSASchool(db.Model):
-    __tablename__ = 'PSA Schools'
-    id = db.Column(db.Integer, primary_key=True)
-    name = db.Column(db.String, nullable=False)
 
 # ====== USER MODELS ======
 class User(db.Model):
@@ -302,8 +342,8 @@ def find_schools():
         return jsonify({"error": "No address provided"}), 400
 
     # Get normalized names of schools we already do business with
-    happy_feet_names = set([normalize_name(s.name) for s in HappyFeetSchool.query.all()])
-    psa_names = set([normalize_name(s.name) for s in PSASchool.query.all()])
+    happy_feet_names = set([normalize_name(s.name) for s in happy_feet])
+    psa_names = set([normalize_name(s.name) for s in psa_preschools()])
     excluded_names = happy_feet_names | psa_names | get_all_sheet_school_names()
 
     # Geocode the address
@@ -478,25 +518,29 @@ def map_schools():
 @app.route("/api/refresh-map-schools", methods=["POST"])
 def refresh_map_schools():
     global MAP_SCHOOL_CACHE
-    # Commented out HappyFeet and PSA geocoding for now
-    # happy_feet = []
-    # for s in HappyFeetSchool.query.all():
-    #     lat, lng = geocode_address(getattr(s, "address", None))
-    #     happy_feet.append({
-    #         "name": s.name,
-    #         "type": "happyfeet",
-    #         "lat": lat,
-    #         "lng": lng
-    #     })
-    # psa = []
-    # for s in PSASchool.query.all():
-    #     lat, lng = geocode_address(getattr(s, "address", None))
-    #     psa.append({
-    #         "name": s.name,
-    #         "type": "psa",
-    #         "lat": lat,
-    #         "lng": lng
-    #     })
+
+    happy_feet_geocoded = []
+    for s in happy_feet:
+        lat, lng = geocode_address(getattr(s, "address", None))
+        happy_feet_geocoded.append({
+            "name": s.name,
+            "address": s.address,
+            "type": "happyfeet",
+            "lat": lat,
+            "lng": lng
+        })
+
+    psa_preschools_geocoded = []
+    for s in psa_preschools:
+        lat, lng = geocode_address(getattr(s, "address", None))
+        psa_preschools_geocoded.append({
+            "name": s.name,
+            "address": s.address,
+            "type": "psa",
+            "lat": lat,
+            "lng": lng
+        })
+
     reached_out = []
     for sheet_rows in ALL_SHEET_DATA.values():
         for row in sheet_rows[1:]:
@@ -511,8 +555,8 @@ def refresh_map_schools():
                     "lng": lng
                 })
     MAP_SCHOOL_CACHE = {
-        # "happyfeet": happy_feet,
-        # "psa": psa,
+        "happyfeet": happy_feet_geocoded,
+        "psa": psa_preschools_geocoded,
         "reached_out": reached_out
     }
     return jsonify({"status": "refreshed"})
