@@ -6,6 +6,7 @@ import re
 import json
 from itertools import permutations
 from math import radians, cos, sin, sqrt, atan2
+import time
 
 from flask import Flask, request, jsonify, render_template_string
 from flask_mail import Mail, Message
@@ -531,6 +532,7 @@ def refresh_map_schools():
             "lat": lat,
             "lng": lng
         })
+        time.sleep(0.1)  # 100ms delay
 
     psa_preschools_geocoded = []
     for s in psa_preschools:
@@ -542,6 +544,7 @@ def refresh_map_schools():
             "lat": lat,
             "lng": lng
         })
+        time.sleep(0.1)  # 100ms delay
 
     reached_out = []
     for sheet_rows in ALL_SHEET_DATA.values():
