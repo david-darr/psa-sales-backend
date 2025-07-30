@@ -536,10 +536,12 @@ def refresh_map_schools():
     reached_out_geocoded = []
     for sheet_rows in ALL_SHEET_DATA.values():
         for row in sheet_rows[1:]:
-            if len(row) > 6 and row[0] and str(row[6]).strip():
-                lat, lng = geocode_address(str(row[6]).strip())
+            if row and row[0]:
+                school_name = row[0]
+                address = row[6] if len(row) > 6 else None
+                lat, lng = geocode_address(address)
                 reached_out_geocoded.append({
-                    "name": row[0],
+                    "name": school_name,
                     "type": "sheet",
                     "lat": lat,
                     "lng": lng
