@@ -6,7 +6,6 @@ import re
 import json
 from itertools import permutations
 from math import radians, cos, sin, sqrt, atan2
-import unicodedata
 
 from flask import Flask, request, jsonify, render_template_string
 from flask_mail import Mail, Message
@@ -27,6 +26,11 @@ from werkzeug.security import generate_password_hash, check_password_hash
 from flask_jwt_extended import (
     JWTManager, create_access_token, jwt_required, get_jwt_identity
 )
+
+
+
+
+
 
 # ====== ENVIRONMENT & APP SETUP ======
 load_dotenv()
@@ -65,19 +69,6 @@ def load_all_sheets():
         all_data[worksheet.title] = rows
     return all_data
 
-def load_PSA_school_sheet():
-    """Load the new Google Sheet for PSA Preschools and Happy Feet."""
-    scope = ['https://spreadsheets.google.com/feeds', 'https://www.googleapis.com/auth/drive']
-    service_account_json = os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON")
-    service_account_info = json.loads(service_account_json)
-    service_account_info["private_key"] = service_account_info["private_key"].replace("\\n", "\n")
-    creds = ServiceAccountCredentials.from_json_keyfile_dict(service_account_info, scope)
-    client = gspread.authorize(creds)
-    sheet = client.open('PSA Preschools')  # <-- change to your new sheet name
-    worksheet = sheet.sheet1
-    rows = worksheet.get_all_values()
-    return rows
-
 # Cached sheet data (refreshed via endpoint)
 ALL_SHEET_DATA = load_all_sheets()
 
@@ -104,6 +95,16 @@ class School(db.Model):
     contact = db.Column(db.String, nullable=False)
     email = db.Column(db.String, nullable=False)
 
+class HappyFeetSchool(db.Model):
+    __tablename__ = 'Happy Feet Schools'
+    id = db.Column(db.Integer, primary_key=True)
+    name = db.Column(db.String, nullable=False)
+
+class PSASchool(db.Model):
+    __tablename__ = 'PSA Schools'
+    id = db.Column(db.Integer, primary_key=True)
+    name = db.Column(db.String, nullable=False)
+
 # ====== USER MODELS ======
 class User(db.Model):
     __tablename__ = 'users'
@@ -121,11 +122,11 @@ class User(db.Model):
         return check_password_hash(self.password_hash, password)
 
 # ====== MAIL CONFIGURATION ======
-app.config['MAIL_SERVER'] = 'smtp.gmail.com'
+app.config['MAIL_SERVER'] = 'smtp.gmail.com'  # or your SMTP server
 app.config['MAIL_PORT'] = 587
 app.config['MAIL_USE_TLS'] = True
-app.config['MAIL_USERNAME'] = os.getenv("MAIL_USERNAME")
-app.config['MAIL_PASSWORD'] = os.getenv("MAIL_PASSWORD")
+app.config['MAIL_USERNAME'] = os.getenv("MAIL_USERNAME")  # your server email
+app.config['MAIL_PASSWORD'] = os.getenv("MAIL_PASSWORD")  # your server email password or app password
 app.config['MAIL_DEFAULT_SENDER'] = os.getenv("MAIL_USERNAME")
 mail = Mail(app)
 
@@ -167,13 +168,6 @@ def send_gmail(user, to_email, subject, body):
     sent = service.users().messages().send(userId="me", body=send_message).execute()
     return sent
 
-def clean_address(address):
-    # Normalize unicode, remove non-printable characters, strip whitespace
-    address = unicodedata.normalize("NFKC", address)
-    address = address.replace('\n', ' ').replace('\r', ' ').replace('\t', ' ')
-    address = re.sub(r'\s+', ' ', address)
-    return address.strip()
-
 def geocode_address(address):
     if not address:
         return None, None
@@ -186,40 +180,6 @@ def geocode_address(address):
         position = items[0]["position"]
         return position["lat"], position["lng"]
     return None, None
-
-def split_sheet_schools(sheet_rows):
-    """
-    Splits sheet rows into PSA Preschools and Happy Feet schools based on indicator rows.
-    PSA Preschools: column 2 is name, column 14 is address.
-    Happy Feet: column 2 is name, column 15 is address.
-    """
-    psa_preschools = []
-    happy_feet = []
-    mode = None  # None, "psa", "happyfeet"
-    for row in sheet_rows:
-        if len(row) < 15:
-            continue
-        indicator = str(row[1]).strip().lower()
-        if indicator == "northern virginia (psa)":
-            mode = "psa"
-            continue
-        elif indicator == "northern virginia (happyfeet)":
-            mode = "happyfeet"
-            continue
-        if mode == "psa":
-            name = str(row[1]).strip()
-            address = str(row[13]).strip()
-            if not name or not address or name.lower() in {"school name", "elementary", "preschool"}:
-                continue
-            psa_preschools.append({"name": name, "address": address})
-        elif mode == "happyfeet":
-            name = str(row[1]).strip()
-            address = str(row[14]).strip()
-            if not name or not address or name.lower() in {"school name", "elementary", "preschool"}:
-                continue
-            happy_feet.append({"name": name, "address": address})
-    return psa_preschools, happy_feet
-
 
 # ====== API ENDPOINTS ======
 
@@ -267,13 +227,14 @@ def profile():
 @app.route("/api/google-login", methods=["POST"])
 def google_login():
     data = request.get_json()
-    code = data.get("code")
+    code = data.get("code")  # <-- use 'code' instead of 'token'
     if not code:
         return jsonify({"error": "Missing Google auth code"}), 400
 
+    # Exchange code for tokens
     client_id = os.getenv("GOOGLE_CLIENT_ID")
     client_secret = os.getenv("GOOGLE_CLIENT_SECRET")
-    redirect_uri = "postmessage"
+    redirect_uri = "postmessage"  # for SPA
 
     token_url = "https://oauth2.googleapis.com/token"
     token_data = {
@@ -333,17 +294,17 @@ def get_schools():
 # --- School Finder API ---
 @app.route("/api/find-schools", methods=["POST"])
 def find_schools():
+    """Find nearby schools not already in the database or sheets."""
     data = request.get_json()
     address = data.get("address")
     keywords = data.get("keywords", ["elementary school", "day care", "preschool", "kindercare", "montessori"])
     if not address:
         return jsonify({"error": "No address provided"}), 400
 
-    # Use cached map school data for exclusion
-    happy_feet_names = set([normalize_name(s["name"]) for s in MAP_SCHOOL_CACHE.get("happyfeet", [])])
-    psa_names = set([normalize_name(s["name"]) for s in MAP_SCHOOL_CACHE.get("psa", [])])
-    reached_out_names = set([normalize_name(s["name"]) for s in MAP_SCHOOL_CACHE.get("reached_out", [])])
-    excluded_names = happy_feet_names | psa_names | reached_out_names | get_all_sheet_school_names()
+    # Get normalized names of schools we already do business with
+    happy_feet_names = set([normalize_name(s.name) for s in HappyFeetSchool.query.all()])
+    psa_names = set([normalize_name(s.name) for s in PSASchool.query.all()])
+    excluded_names = happy_feet_names | psa_names | get_all_sheet_school_names()
 
     # Geocode the address
     lat, lng = geocode_address(address)
@@ -375,7 +336,7 @@ def find_schools():
         if pid and pid not in unique:
             unique[pid] = result
 
-    # Filter out schools that are already in Happy Feet, PSA, or reached_out (fuzzy match)
+    # Filter out schools that are already in Happy Feet or PSA tables (fuzzy match)
     schools = []
     for result in unique.values():
         school_name = result.get("name", "")
@@ -443,6 +404,7 @@ def route_plan():
     route = [schools[i]["place_id"] for i in min_order]
     return jsonify({"route": route})
 
+
 # --- Email API ---
 EMAIL_TEMPLATE = """
 Hi [Director/Administrator's Name],
@@ -505,6 +467,7 @@ def send_email():
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
+
 # --- MAP API ---
 MAP_SCHOOL_CACHE = {}
 
@@ -515,55 +478,42 @@ def map_schools():
 @app.route("/api/refresh-map-schools", methods=["POST"])
 def refresh_map_schools():
     global MAP_SCHOOL_CACHE
-    new_sheet_rows = load_PSA_school_sheet()
-    psa_preschools, happy_feet = split_sheet_schools(new_sheet_rows)
-
-    # Geocode HappyFeet schools
-    happy_feet_geocoded = []
-    for s in happy_feet:
-        lat, lng = geocode_address(s["address"])
-        happy_feet_geocoded.append({
-            "name": s["name"],
-            "address": s["address"],
-            "type": "happyfeet",
-            "lat": lat,
-            "lng": lng
-        })
-
-    # Geocode PSA Preschools
-    psa_preschools_geocoded = []
-    for s in psa_preschools:
-        cleaned_address = clean_address(s["address"])
-        lat, lng = geocode_address(cleaned_address)
-        psa_preschools_geocoded.append({
-            "name": s["name"],
-            "address": cleaned_address,
-            "type": "psa",
-            "lat": lat,
-            "lng": lng
-        })
-
-    # Geocode reached_out schools from ALL_SHEET_DATA, ensure address is present and not blank
-    reached_out_geocoded = []
+    # Commented out HappyFeet and PSA geocoding for now
+    # happy_feet = []
+    # for s in HappyFeetSchool.query.all():
+    #     lat, lng = geocode_address(getattr(s, "address", None))
+    #     happy_feet.append({
+    #         "name": s.name,
+    #         "type": "happyfeet",
+    #         "lat": lat,
+    #         "lng": lng
+    #     })
+    # psa = []
+    # for s in PSASchool.query.all():
+    #     lat, lng = geocode_address(getattr(s, "address", None))
+    #     psa.append({
+    #         "name": s.name,
+    #         "type": "psa",
+    #         "lat": lat,
+    #         "lng": lng
+    #     })
+    reached_out = []
     for sheet_rows in ALL_SHEET_DATA.values():
         for row in sheet_rows[1:]:
             if row and row[0]:
                 school_name = row[0]
                 address = row[6] if len(row) > 6 else None
                 lat, lng = geocode_address(address)
-                reached_out_geocoded.append({
+                reached_out.append({
                     "name": school_name,
-                    "address": address,
                     "type": "sheet",
                     "lat": lat,
                     "lng": lng
                 })
-
     MAP_SCHOOL_CACHE = {
-        "happyfeet": happy_feet_geocoded,
-        "psa": psa_preschools_geocoded,
-        "reached_out": reached_out_geocoded
+        # "happyfeet": happy_feet,
+        # "psa": psa,
+        "reached_out": reached_out
     }
     return jsonify({"status": "refreshed"})
-
 
