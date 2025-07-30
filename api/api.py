@@ -182,16 +182,15 @@ def geocode_address(address):
 def split_sheet_schools(sheet_rows):
     """
     Splits sheet rows into PSA Preschools and Happy Feet schools based on indicator rows.
-    Assumes column 1 is serial, column 2 is name, column 14 is address.
+    PSA Preschools: column 2 is name, column 14 is address.
+    Happy Feet: column 2 is name, column 15 is address.
     """
     psa_preschools = []
     happy_feet = []
     mode = None  # None, "psa", "happyfeet"
     for row in sheet_rows:
-        # Defensive: skip rows that are too short
-        if len(row) < 14:
+        if len(row) < 15:
             continue
-        # Detect section indicators
         indicator = str(row[1]).strip().lower()
         if indicator == "northern virginia (psa)":
             mode = "psa"
@@ -199,31 +198,19 @@ def split_sheet_schools(sheet_rows):
         elif indicator == "northern virginia (happyfeet)":
             mode = "happyfeet"
             continue
-        # Only process rows in a valid mode
-        if mode in ("psa", "happyfeet"):
+        if mode == "psa":
             name = str(row[1]).strip()
             address = str(row[13]).strip()
-            # Skip blank names, addresses, or generic headers
             if not name or not address or name.lower() in {"school name", "elementary", "preschool"}:
                 continue
-            entry = {"name": name, "address": address}
-            if mode == "psa":
-                psa_preschools.append(entry)
-            else:
-                happy_feet.append(entry)
+            psa_preschools.append({"name": name, "address": address})
+        elif mode == "happyfeet":
+            name = str(row[1]).strip()
+            address = str(row[14]).strip()
+            if not name or not address or name.lower() in {"school name", "elementary", "preschool"}:
+                continue
+            happy_feet.append({"name": name, "address": address})
     return psa_preschools, happy_feet
-
-def geocode_school_list(schools, school_type):
-    geocoded = []
-    for s in schools:
-        lat, lng = geocode_address(s["address"])
-        geocoded.append({
-            "name": s["name"],
-            "type": school_type,
-            "lat": lat,
-            "lng": lng
-        })
-    return geocoded
 
 # ====== API ENDPOINTS ======
 
@@ -525,12 +512,13 @@ def refresh_map_schools():
     happy_feet_geocoded = geocode_school_list(happy_feet, "happyfeet")
     psa_preschools_geocoded = geocode_school_list(psa_preschools, "psa")
 
-    # Geocode reached_out schools from ALL_SHEET_DATA
+    # Geocode reached_out schools from ALL_SHEET_DATA, ensure address is present and not blank
     reached_out_raw = []
     for sheet_rows in ALL_SHEET_DATA.values():
         for row in sheet_rows[1:]:
-            if len(row) > 6 and row[0] and row[6]:
-                reached_out_raw.append({"name": row[0], "address": row[6]})
+            # Use column 7 (index 6) for address, skip if missing or blank
+            if len(row) > 6 and row[0] and str(row[6]).strip():
+                reached_out_raw.append({"name": row[0], "address": str(row[6]).strip()})
     reached_out = geocode_school_list(reached_out_raw, "sheet")
 
     MAP_SCHOOL_CACHE = {
