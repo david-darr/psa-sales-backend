@@ -6,6 +6,7 @@ import re
 import json
 from itertools import permutations
 from math import radians, cos, sin, sqrt, atan2
+import unicodedata
 
 from flask import Flask, request, jsonify, render_template_string
 from flask_mail import Mail, Message
@@ -165,6 +166,13 @@ def send_gmail(user, to_email, subject, body):
     send_message = {'raw': raw}
     sent = service.users().messages().send(userId="me", body=send_message).execute()
     return sent
+
+def clean_address(address):
+    # Normalize unicode, remove non-printable characters, strip whitespace
+    address = unicodedata.normalize("NFKC", address)
+    address = address.replace('\n', ' ').replace('\r', ' ').replace('\t', ' ')
+    address = re.sub(r'\s+', ' ', address)
+    return address.strip()
 
 def geocode_address(address):
     if not address:
@@ -525,10 +533,11 @@ def refresh_map_schools():
     # Geocode PSA Preschools
     psa_preschools_geocoded = []
     for s in psa_preschools:
-        lat, lng = geocode_address(s["address"])
+        cleaned_address = clean_address(s["address"])
+        lat, lng = geocode_address(cleaned_address)
         psa_preschools_geocoded.append({
             "name": s["name"],
-            "address": s["address"],
+            "address": cleaned_address,
             "type": "psa",
             "lat": lat,
             "lng": lng
