@@ -516,6 +516,7 @@ def refresh_map_schools():
         lat, lng = geocode_address(s["address"])
         happy_feet_geocoded.append({
             "name": s["name"],
+            "address": s["address"],
             "type": "happyfeet",
             "lat": lat,
             "lng": lng
@@ -527,6 +528,7 @@ def refresh_map_schools():
         lat, lng = geocode_address(s["address"])
         psa_preschools_geocoded.append({
             "name": s["name"],
+            "address": s["address"],
             "type": "psa",
             "lat": lat,
             "lng": lng
@@ -542,6 +544,7 @@ def refresh_map_schools():
                 lat, lng = geocode_address(address)
                 reached_out_geocoded.append({
                     "name": school_name,
+                    "address": address,
                     "type": "sheet",
                     "lat": lat,
                     "lng": lng
