@@ -168,6 +168,17 @@ def send_gmail(user, to_email, subject, body):
     sent = service.users().messages().send(userId="me", body=send_message).execute()
     return sent
 
+def geocode_address(address):
+    if not address:
+        return None, None
+    geo_url = "https://maps.googleapis.com/maps/api/geocode/json"
+    params = {"address": address, "key": GOOGLE_API_KEY}
+    resp = requests.get(geo_url, params=params).json()
+    if resp["results"]:
+        loc = resp["results"][0]["geometry"]["location"]
+        return loc["lat"], loc["lng"]
+    return None, None
+
 # ====== API ENDPOINTS ======
 
 # --- USER API ---
@@ -464,21 +475,38 @@ def send_email():
 # --- MAP API ---
 @app.route("/api/map-schools", methods=["GET"])
 def map_schools():
-    # Schools already in (HappyFeet + PSA)
-    happy_feet = [
-        {"name": s.name, "type": "happyfeet"}
-        for s in HappyFeetSchool.query.all()
-    ]
-    psa = [
-        {"name": s.name, "type": "psa"}
-        for s in PSASchool.query.all()
-    ]
-    # Schools reached out to (from Google Sheets)
+    happy_feet = []
+    for s in HappyFeetSchool.query.all():
+        # If you have address, use it; otherwise, skip lat/lng
+        lat, lng = geocode_address(getattr(s, "address", None))
+        happy_feet.append({
+            "name": s.name,
+            "type": "happyfeet",
+            "lat": lat,
+            "lng": lng
+        })
+    psa = []
+    for s in PSASchool.query.all():
+        lat, lng = geocode_address(getattr(s, "address", None))
+        psa.append({
+            "name": s.name,
+            "type": "psa",
+            "lat": lat,
+            "lng": lng
+        })
     reached_out = []
     for sheet_rows in ALL_SHEET_DATA.values():
         for row in sheet_rows[1:]:  # skip header
             if row and row[0]:
-                reached_out.append({"name": row[0], "type": "sheet"})
+                school_name = row[0]
+                address = row[1] if len(row) > 1 else None
+                lat, lng = geocode_address(address)
+                reached_out.append({
+                    "name": school_name,
+                    "type": "sheet",
+                    "lat": lat,
+                    "lng": lng
+                })
     return jsonify({
         "happyfeet": happy_feet,
         "psa": psa,
