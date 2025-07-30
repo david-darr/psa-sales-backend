@@ -342,8 +342,8 @@ def find_schools():
         return jsonify({"error": "No address provided"}), 400
 
     # Get normalized names of schools we already do business with
-    happy_feet_names = set([normalize_name(s.name) for s in happy_feet])
-    psa_names = set([normalize_name(s.name) for s in psa_preschools()])
+    happy_feet_names = set([normalize_name(s["name"]) for s in happy_feet])
+    psa_names = set([normalize_name(s["name"]) for s in psa_preschools])
     excluded_names = happy_feet_names | psa_names | get_all_sheet_school_names()
 
     # Geocode the address
@@ -518,13 +518,14 @@ def map_schools():
 @app.route("/api/refresh-map-schools", methods=["POST"])
 def refresh_map_schools():
     global MAP_SCHOOL_CACHE
+    psa_preschools, happy_feet = split_sheet_schools(load_all_sheets())
 
     happy_feet_geocoded = []
     for s in happy_feet:
-        lat, lng = geocode_address(getattr(s, "address", None))
+        lat, lng = geocode_address(s["address"])
         happy_feet_geocoded.append({
-            "name": s.name,
-            "address": s.address,
+            "name": s["name"],
+            "address": s["address"],
             "type": "happyfeet",
             "lat": lat,
             "lng": lng
@@ -532,10 +533,10 @@ def refresh_map_schools():
 
     psa_preschools_geocoded = []
     for s in psa_preschools:
-        lat, lng = geocode_address(getattr(s, "address", None))
+        lat, lng = geocode_address(s["address"])
         psa_preschools_geocoded.append({
-            "name": s.name,
-            "address": s.address,
+            "name": s["name"],
+            "address": s["address"],
             "type": "psa",
             "lat": lat,
             "lng": lng
