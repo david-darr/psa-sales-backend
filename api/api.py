@@ -496,10 +496,10 @@ def map_schools():
         })
     reached_out = []
     for sheet_rows in ALL_SHEET_DATA.values():
-        for row in sheet_rows[1:]:  # skip header
+        for row in sheet_rows[1:]:  
             if row and row[0]:
                 school_name = row[0]
-                address = row[1] if len(row) > 1 else None
+                address = row[6] if len(row) > 6 else None  
                 lat, lng = geocode_address(address)
                 reached_out.append({
                     "name": school_name,
