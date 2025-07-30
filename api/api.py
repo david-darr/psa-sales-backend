@@ -122,6 +122,11 @@ def split_sheet_schools(sheet_rows):
 ALL_SHEET_DATA = load_all_sheets()
 psa_preschools, happy_feet = split_sheet_schools(load_all_sheets())
 
+REC_SITES = [
+    {"name": "Hanson Park", "address": "22831 Hanson Park Dr, Aldie, VA 20105"},
+    {"name": "Rec Center 2", "address": "456 Park Ave, Fairfax, VA"}
+]
+
 GENERIC_NAMES = {"elementary", "preschool", "school name", "elementary school"}
 
 def get_all_sheet_school_names():
@@ -335,12 +340,17 @@ def get_schools():
 # --- School Finder API ---
 @app.route("/api/find-schools", methods=["POST"])
 def find_schools():
-    """Find nearby schools not already in the database or sheets."""
     data = request.get_json()
     address = data.get("address")
     keywords = data.get("keywords", ["elementary school", "day care", "preschool", "kindercare", "montessori"])
     if not address:
         return jsonify({"error": "No address provided"}), 400
+
+    # If address is a zip code or a city, append "USA" to prioritize US geocoding
+    if re.fullmatch(r"\d{5}", address.strip()):
+        address = f"{address.strip()} USA"
+    elif re.fullmatch(r"[a-zA-Z ]+", address.strip()):
+        address = f"{address.strip()} USA"
 
     # Get normalized names of schools we already do business with
     happy_feet_names = set([normalize_name(s["name"]) for s in happy_feet])
@@ -559,10 +569,23 @@ def refresh_map_schools():
                     "lat": lat,
                     "lng": lng
                 })
+    
+    rec_geocoded = []
+    for site in REC_SITES:
+        lat, lng = geocode_address(site["address"])
+        rec_geocoded.append({
+            "name": site["name"],
+            "address": site["address"],
+            "type": "rec",
+            "lat": lat,
+            "lng": lng
+        })
+
     MAP_SCHOOL_CACHE = {
         "happyfeet": happy_feet_geocoded,
         "psa": psa_preschools_geocoded,
-        "reached_out": reached_out
+        "reached_out": reached_out,
+        "rec": rec_geocoded,
     }
     return jsonify({"status": "refreshed"})
 
