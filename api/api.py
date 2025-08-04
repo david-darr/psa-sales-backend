@@ -22,6 +22,8 @@ from googleapiclient.discovery import build
 from google.oauth2.credentials import Credentials
 import base64
 from email.mime.text import MIMEText
+from apscheduler.schedulers.background import BackgroundScheduler
+from datetime import datetime, timedelta
 
 from werkzeug.security import generate_password_hash, check_password_hash
 from flask_jwt_extended import (
@@ -166,6 +168,18 @@ class User(db.Model):
         self.password_hash = generate_password_hash(password)
     def check_password(self, password):
         return check_password_hash(self.password_hash, password)
+
+class SentEmail(db.Model):
+    __tablename__ = 'sent_emails'
+    id = db.Column(db.Integer, primary_key=True)
+    school_name = db.Column(db.String, nullable=False)
+    school_email = db.Column(db.String, nullable=False)
+    sent_at = db.Column(db.DateTime, default=datetime.utcnow)
+    responded = db.Column(db.Boolean, default=False)
+    followup_sent = db.Column(db.Boolean, default=False)
+    user_id = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=False)
+
+    user = db.relationship('User', backref=db.backref('sent_emails', lazy=True))
 
 # ====== MAIL CONFIGURATION ======
 app.config['MAIL_SERVER'] = 'smtp.gmail.com'  # or your SMTP server
@@ -489,6 +503,19 @@ Best regards,
  https://thepsasports.com
 """
 
+FOLLOWUP_TEMPLATE = """
+Hi {{ school_name }},
+
+I wanted to follow up on my previous email regarding PSA's on-site sports programs for preschools. We would love to set up a free demo session for your students to experience the fun firsthand.
+
+Please let me know if you have any questions or would like to schedule a quick call to discuss further.
+
+Best regards,  
+[Your Name]  
+Sales Associate and Coach  
+[Your Contact Info]
+"""
+
 @app.route("/api/send-email", methods=["POST"])
 @jwt_required()
 def send_email():
@@ -514,9 +541,83 @@ def send_email():
 
     try:
         send_gmail(user, recipient, subject, body)
+        # Log the email in the database
+        new_email = SentEmail(
+            school_name=school_name,
+            school_email=recipient,
+            user_id=user_id,  # Associate email with the user
+            responded=False,
+            followup_sent=False
+        )
+        db.session.add(new_email)
+        db.session.commit()
         return jsonify({"status": "sent"})
     except Exception as e:
         return jsonify({"error": str(e)}), 500
+
+scheduler = BackgroundScheduler()
+
+def check_for_followups():
+    now = datetime.now()
+    three_days_ago = now - timedelta(days=3)
+
+    # Fetch emails that need follow-ups
+    pending_followups = SentEmail.query.filter(
+        SentEmail.sent_at <= three_days_ago,
+        SentEmail.responded == False,
+        SentEmail.followup_sent == False
+    ).all()
+
+    for email in pending_followups:
+        user = User.query.get(email.user_id)  # Get the user who sent the email
+        if not user or not user.gmail_access_token:
+            continue  # Skip if the user is not connected to Gmail
+
+        # Send follow-up email
+        followup_body = render_template_string(
+            FOLLOWUP_TEMPLATE,
+            school_name=email.school_name
+        )
+        send_gmail(user, email.school_email, "Follow-Up: PSA Programs", followup_body)
+        email.followup_sent = True
+        db.session.commit()
+
+# Schedule the task to run daily
+scheduler.add_job(check_for_followups, 'interval', days=1)
+scheduler.start()
+
+def check_email_responses():
+    # Fetch all users with Gmail access tokens
+    users = User.query.filter(User.gmail_access_token.isnot(None)).all()
+
+    for user in users:
+        # Initialize credentials for each user
+        creds = Credentials(
+            token=user.gmail_access_token,
+            refresh_token=user.gmail_refresh_token,
+            token_uri="https://oauth2.googleapis.com/token",
+            client_id=os.getenv("GOOGLE_CLIENT_ID"),
+            client_secret=os.getenv("GOOGLE_CLIENT_SECRET"),
+            scopes=["https://www.googleapis.com/auth/gmail.readonly"]
+        )
+
+        # Build the Gmail API service
+        service = build('gmail', 'v1', credentials=creds)
+
+        # Fetch unread messages from the inbox
+        results = service.users().messages().list(userId='me', q="is:inbox").execute()
+        messages = results.get('messages', [])
+
+        for msg in messages:
+            message = service.users().messages().get(userId='me', id=msg['id']).execute()
+            headers = message['payload']['headers']
+            from_email = next((h['value'] for h in headers if h['name'] == 'From'), None)
+
+            # Match the email to a school in the database
+            email_entry = SentEmail.query.filter_by(school_email=from_email).first()
+            if email_entry:
+                email_entry.responded = True
+                db.session.commit()
 
 
 # --- MAP API ---
@@ -588,4 +689,21 @@ def refresh_map_schools():
         "rec": rec_geocoded,
     }
     return jsonify({"status": "refreshed"})
+
+@app.route("/api/sent-emails", methods=["GET"])
+@jwt_required()
+def get_sent_emails():
+    user_id = get_jwt_identity()
+    emails = SentEmail.query.filter_by(user_id=user_id).all()
+    return jsonify([
+        {
+            "id": email.id,
+            "school_name": email.school_name,
+            "school_email": email.school_email,
+            "sent_at": email.sent_at,
+            "responded": email.responded,
+            "followup_sent": email.followup_sent
+        }
+        for email in emails
+    ])
 
