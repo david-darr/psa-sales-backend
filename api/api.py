@@ -18,11 +18,6 @@ import gspread
 from oauth2client.service_account import ServiceAccountCredentials
 from google.oauth2 import id_token
 from google.auth.transport import requests as google_requests
-from googleapiclient.discovery import build
-from google.oauth2.credentials import Credentials
-import base64
-from email.mime.text import MIMEText
-from apscheduler.schedulers.background import BackgroundScheduler
 from datetime import datetime, timedelta
 
 from werkzeug.security import generate_password_hash, check_password_hash
@@ -57,22 +52,6 @@ app.config["JWT_SECRET_KEY"] = os.getenv("JWT_SECRET_KEY")
 jwt = JWTManager(app)
 
 # ====== GOOGLE SHEETS LOADING ======
-# Sheet of Sales Schools
-def load_all_sheets():
-    """Load all worksheets from Google Sheets into a dictionary."""
-    scope = ['https://spreadsheets.google.com/feeds', 'https://www.googleapis.com/auth/drive']
-    service_account_json = os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON")
-    service_account_info = json.loads(service_account_json)
-    service_account_info["private_key"] = service_account_info["private_key"].replace("\\n", "\n")
-    creds = ServiceAccountCredentials.from_json_keyfile_dict(service_account_info, scope)
-    client = gspread.authorize(creds)
-    sheet = client.open('PSA sales from Scratch')
-    all_data = {}
-    for worksheet in sheet.worksheets():
-        rows = worksheet.get_all_values()
-        all_data[worksheet.title] = rows
-    return all_data
-
 # Sheet of Happy Feet and PSA Schools
 def load_PSA_school_sheet():
     """Load the new Google Sheet for PSA Preschools and Happy Feet."""
@@ -121,26 +100,14 @@ def split_sheet_schools(sheet_rows):
     return psa_preschools, happy_feet
 
 # Cached sheet data (refreshed via endpoint)
-ALL_SHEET_DATA = load_all_sheets()
-psa_preschools, happy_feet = split_sheet_schools(load_all_sheets())
+psa_preschools, happy_feet = split_sheet_schools(load_PSA_school_sheet())
 
 REC_SITES = [
     {"name": "Hanson Park", "address": "22831 Hanson Park Dr, Aldie, VA 20105"},
-    {"name": "Rec Center 2", "address": "456 Park Ave, Fairfax, VA"}
+    {"name": "Heron Overlook", "address": "20550 Heron overlook Plz, Ashburn, VA 20147"}
 ]
 
 GENERIC_NAMES = {"elementary", "preschool", "school name", "elementary school"}
-
-def get_all_sheet_school_names():
-    """Return a set of normalized school names from all sheets, excluding generic names."""
-    excluded_names = set()
-    for sheet_rows in ALL_SHEET_DATA.values():
-        for row in sheet_rows:
-            if row and row[0]:
-                norm = normalize_name(row[0])
-                if norm not in GENERIC_NAMES:
-                    excluded_names.add(norm)
-    return excluded_names
 
 
 # ====== DATABASE MODELS ======
@@ -153,6 +120,21 @@ class School(db.Model):
     contact = db.Column(db.String, nullable=False)
     email = db.Column(db.String, nullable=False)
 
+class SalesSchool(db.Model):
+    __tablename__ = 'sales_schools'
+    id = db.Column(db.Integer, primary_key=True)
+    school_name = db.Column(db.String, nullable=False)
+    contact_name = db.Column(db.String, nullable=True)
+    email = db.Column(db.String, nullable=False)
+    phone = db.Column(db.String, nullable=True)
+    address = db.Column(db.String, nullable=True)
+    status = db.Column(db.String, default='pending')  # pending, contacted, responded, etc.
+    notes = db.Column(db.Text, nullable=True)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    user_id = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=False)
+    
+    user = db.relationship('User', backref=db.backref('sales_schools', lazy=True))
+
 # ====== USER MODELS ======
 class User(db.Model):
     __tablename__ = 'users'
@@ -161,8 +143,11 @@ class User(db.Model):
     email = db.Column(db.String, unique=True, nullable=False)
     phone = db.Column(db.String, nullable=True)
     password_hash = db.Column(db.String, nullable=False)
-    gmail_access_token = db.Column(db.String, nullable=True)      
-    gmail_refresh_token = db.Column(db.String, nullable=True)     
+    
+    # Email settings for sending emails
+    email_password = db.Column(db.String, nullable=True)  # App password for Gmail
+    smtp_server = db.Column(db.String, default='smtp.gmail.com')
+    smtp_port = db.Column(db.Integer, default=587)
 
     def set_password(self, password):
         self.password_hash = generate_password_hash(password)
@@ -209,25 +194,6 @@ def haversine(lat1, lng1, lat2, lng2):
     c = 2 * atan2(sqrt(a), sqrt(1-a))
     return R * c
 
-def send_gmail(user, to_email, subject, body):
-    creds = Credentials(
-        token=user.gmail_access_token,
-        refresh_token=user.gmail_refresh_token,
-        token_uri="https://oauth2.googleapis.com/token",
-        client_id=os.getenv("GOOGLE_CLIENT_ID"),
-        client_secret=os.getenv("GOOGLE_CLIENT_SECRET"),
-        scopes=["https://www.googleapis.com/auth/gmail.send"]
-    )
-    service = build('gmail', 'v1', credentials=creds)
-    message = MIMEText(body)
-    message['to'] = to_email
-    message['from'] = user.email
-    message['subject'] = subject
-    raw = base64.urlsafe_b64encode(message.as_bytes()).decode()
-    send_message = {'raw': raw}
-    sent = service.users().messages().send(userId="me", body=send_message).execute()
-    return sent
-
 def geocode_address(address):
     if not address:
         return None, None
@@ -241,6 +207,7 @@ def geocode_address(address):
         return position["lat"], position["lng"]
     return None, None
 
+
 # ====== API ENDPOINTS ======
 
 # --- USER API ---
@@ -251,14 +218,19 @@ def register():
     email = data.get("email")
     phone = data.get("phone")
     password = data.get("password")
+    
     if not all([name, email, password]):
         return jsonify({"error": "Missing required fields"}), 400
+    
     if User.query.filter_by(email=email).first():
         return jsonify({"error": "Email already registered"}), 400
+    
+    # Save to database
     user = User(name=name, email=email, phone=phone)
     user.set_password(password)
     db.session.add(user)
     db.session.commit()
+    
     return jsonify({"message": "User registered successfully"})
 
 @app.route("/api/login", methods=["POST"])
@@ -284,62 +256,84 @@ def profile():
         return jsonify({"error": "User not found"}), 404
     return jsonify({"id": user.id, "name": user.name, "email": user.email, "phone": user.phone})
 
-@app.route("/api/google-login", methods=["POST"])
-def google_login():
+@app.route("/api/email-settings", methods=["POST"])
+@jwt_required()
+def save_email_settings():
     data = request.get_json()
-    code = data.get("code")  # <-- use 'code' instead of 'token'
-    if not code:
-        return jsonify({"error": "Missing Google auth code"}), 400
-
-    # Exchange code for tokens
-    client_id = os.getenv("GOOGLE_CLIENT_ID")
-    client_secret = os.getenv("GOOGLE_CLIENT_SECRET")
-    redirect_uri = "postmessage"  # for SPA
-
-    token_url = "https://oauth2.googleapis.com/token"
-    token_data = {
-        "code": code,
-        "client_id": client_id,
-        "client_secret": client_secret,
-        "redirect_uri": redirect_uri,
-        "grant_type": "authorization_code"
-    }
-    token_resp = requests.post(token_url, data=token_data)
-    if not token_resp.ok:
-        return jsonify({"error": "Failed to exchange code"}), 400
-    tokens = token_resp.json()
-    access_token = tokens.get("access_token")
-    refresh_token = tokens.get("refresh_token")
-    from google.auth.transport.requests import Request as GoogleRequest
-    from google.oauth2 import id_token
-    idinfo = id_token.verify_oauth2_token(tokens["id_token"], GoogleRequest(), client_id)
-    email = idinfo["email"]
-    name = idinfo.get("name", email.split("@")[0])
-    user = User.query.filter_by(email=email).first()
+    email_password = data.get("email_password")
+    
+    if not email_password:
+        return jsonify({"error": "Email password required"}), 400
+    
+    user_id = get_jwt_identity()
+    user = User.query.get(user_id)
     if not user:
-        user = User(name=name, email=email, phone=None, password_hash="")
-        db.session.add(user)
-    user.gmail_access_token = access_token
-    user.gmail_refresh_token = refresh_token
+        return jsonify({"error": "User not found"}), 404
+    
+    # Save encrypted email password (you might want to encrypt this)
+    user.email_password = email_password
     db.session.commit()
-    access_token_jwt = create_access_token(identity=str(user.id))
-    return jsonify({
-        "access_token": access_token_jwt,
-        "user": {"id": user.id, "name": user.name, "email": user.email, "phone": user.phone}
-    })
+    
+    return jsonify({"message": "Email settings saved"})
 
-# --- Sheets API ---
-@app.route("/api/team-sheets", methods=["GET"])
-def get_team_sheets():
-    """Return all sheet data for frontend display."""
-    return jsonify(ALL_SHEET_DATA)
+@app.route("/api/add-school", methods=["POST"])
+@jwt_required()
+def add_school():
+    data = request.get_json()
+    school_name = data.get("school_name")
+    email = data.get("email")
+    contact_name = data.get("contact_name")
+    phone = data.get("phone")
+    address = data.get("address")
+    
+    if not all([school_name, email]):
+        return jsonify({"error": "School name and email required"}), 400
+    
+    user_id = get_jwt_identity()
+    
+    # Check if school already exists for this user
+    existing = SalesSchool.query.filter_by(
+        school_name=school_name, 
+        user_id=user_id
+    ).first()
+    
+    if existing:
+        return jsonify({"error": "School already exists"}), 400
+    
+    school = SalesSchool(
+        school_name=school_name,
+        contact_name=contact_name,
+        email=email,
+        phone=phone,
+        address=address,
+        user_id=user_id
+    )
+    
+    db.session.add(school)
+    db.session.commit()
+    
+    return jsonify({"message": "School added successfully"})
 
-@app.route("/api/refresh-sheets", methods=["POST"])
-def refresh_sheets():
-    """Reload all sheets from Google Sheets."""
-    global ALL_SHEET_DATA
-    ALL_SHEET_DATA = load_all_sheets()
-    return jsonify({"status": "refreshed"})
+@app.route("/api/my-schools", methods=["GET"])
+@jwt_required()
+def get_my_schools():
+    user_id = get_jwt_identity()
+    schools = SalesSchool.query.filter_by(user_id=user_id).all()
+    
+    return jsonify([
+        {
+            "id": school.id,
+            "school_name": school.school_name,
+            "contact_name": school.contact_name,
+            "email": school.email,
+            "phone": school.phone,
+            "address": school.address,
+            "status": school.status,
+            "notes": school.notes,
+            "created_at": school.created_at
+        }
+        for school in schools
+    ])
 
 # --- School List API ---
 @app.route("/api/schools", methods=["GET"])
@@ -369,7 +363,7 @@ def find_schools():
     # Get normalized names of schools we already do business with
     happy_feet_names = set([normalize_name(s["name"]) for s in happy_feet])
     psa_names = set([normalize_name(s["name"]) for s in psa_preschools])
-    excluded_names = happy_feet_names | psa_names | get_all_sheet_school_names()
+    excluded_names = happy_feet_names | psa_names
 
     # Geocode the address
     lat, lng = geocode_address(address)
@@ -472,152 +466,198 @@ def route_plan():
 
 # --- Email API ---
 EMAIL_TEMPLATE = """
-Hi [Director/Administrator's Name],
+Hi {{ contact_name }},
 
-My name is {{ user_name }}, and I'm with The Players Sports Academy (PSA) — a nonprofit organization offering fun, convenient sports activities for preschool students ages 2-5 right on campus during the school day. It was a pleasure visiting {{ school_name }} recently! I dropped off a folder at the front desk outlining our on-site sports programs, and I hope it made its way to you. For your convenience, I've also attached a copy of the flyer.
+My name is {{ user_name }}, and I'm with The Players Sports Academy (PSA) — a nonprofit organization offering fun, convenient sports activities for preschool students ages 2-5 right on campus during the school day. 
+
+It was a pleasure learning about {{ school_name }}! I'd love to share information about our on-site sports programs.
+
 PSA TOTS currently works with over 60 preschools in the Northern Virginia area, providing quality sports programs designed specifically for young learners.
+
 Here's why schools and families love working with PSA:
-On-site convenience - Programs run during school hours with no extra work for your team.
-
-
-All equipment provided - I bring everything needed for each session.
-
-
-Flexible scheduling - Programs available seasonally or year-round.
-
-
-Variety of activities - we offer Soccer, Basketball, T-Ball, and Yoga designed specifically for young learners.
-
-
-Fundraising opportunity - we offer schools the chance to raise funds through the programs.
-
+• On-site convenience - Programs run during school hours with no extra work for your team
+• All equipment provided - I bring everything needed for each session
+• Flexible scheduling - Programs available seasonally or year-round
+• Variety of activities - Soccer, Basketball, T-Ball, and Yoga designed for young learners
+• Fundraising opportunity - Schools can raise funds through the programs
 
 We would love to set up a free demo session so your students can experience the fun firsthand!
-Would you be open to a quick call or meeting to discuss the details? Please let me know a date and time that works best for you, and I’ll be sure to accommodate.
+
+Would you be open to a quick call or meeting to discuss the details? Please let me know a date and time that works best for you.
+
 Thank you for your time, and I look forward to the opportunity to work together!
 
 Best regards,
- {{ user_name }}
- Sales Associate and Coach
- [Phone Number] | {{ user_email }}
- https://thepsasports.com
+{{ user_name }}
+Sales Associate and Coach
+{{ user_email }}
+https://thepsasports.com
 """
 
 FOLLOWUP_TEMPLATE = """
-Hi {{ school_name }},
+Hi there,
 
-I wanted to follow up on my previous email regarding PSA's on-site sports programs for preschools. We would love to set up a free demo session for your students to experience the fun firsthand.
+I wanted to follow up on my previous email regarding PSA's on-site sports programs for {{ school_name }}. We would love to set up a free demo session for your students to experience the fun firsthand.
 
 Please let me know if you have any questions or would like to schedule a quick call to discuss further.
 
 Best regards,  
-[Your Name]  
+{{ user_name }}  
 Sales Associate and Coach  
-[Your Contact Info]
+{{ user_email }}
+https://thepsasports.com
 """
 
 @app.route("/api/send-email", methods=["POST"])
 @jwt_required()
 def send_email():
     data = request.get_json()
-    recipient = data.get("recipient")
+    school_ids = data.get("school_ids", [])  # List of school IDs to send to
     subject = data.get("subject", "Let's Connect! PSA Programs")
-    school_name = data.get("school_name", "")
-    if not recipient:
-        return jsonify({"error": "Missing recipient"}), 400
+    
+    if not school_ids:
+        return jsonify({"error": "No schools selected"}), 400
 
     user_id = get_jwt_identity()
     user = User.query.get(user_id)
-    if not user or not user.gmail_access_token:
-        return jsonify({"error": "User not connected with Gmail"}), 400
+    if not user:
+        return jsonify({"error": "User not found"}), 400
+    
+    if not user.email_password:
+        return jsonify({"error": "Email settings not configured"}), 400
 
-    body = render_template_string(
-        EMAIL_TEMPLATE,
+    # Get selected schools
+    schools = SalesSchool.query.filter(
+        SalesSchool.id.in_(school_ids),
+        SalesSchool.user_id == user_id
+    ).all()
+    
+    if not schools:
+        return jsonify({"error": "No valid schools found"}), 400
+
+    sent_count = 0
+    errors = []
+
+    for school in schools:
+        try:
+            # Create email body
+            body = render_template_string(
+                EMAIL_TEMPLATE,
+                user_name=user.name,
+                user_email=user.email,
+                school_name=school.school_name,
+                contact_name=school.contact_name or "Director/Administrator"
+            )
+
+            # Configure Flask-Mail for this user
+            app.config['MAIL_USERNAME'] = user.email
+            app.config['MAIL_PASSWORD'] = user.email_password
+            app.config['MAIL_DEFAULT_SENDER'] = user.email
+            
+            # Send email
+            msg = Message(
+                subject=subject,
+                recipients=[school.email],
+                body=body,
+                sender=user.email
+            )
+            mail.send(msg)
+            
+            # Log the email
+            new_email = SentEmail(
+                school_name=school.school_name,
+                school_email=school.email,
+                user_id=user_id,
+                responded=False,
+                followup_sent=False
+            )
+            db.session.add(new_email)
+            
+            # Update school status
+            school.status = 'contacted'
+            
+            sent_count += 1
+            
+        except Exception as e:
+            errors.append(f"Failed to send to {school.school_name}: {str(e)}")
+    
+    db.session.commit()
+    
+    return jsonify({
+        "status": f"{sent_count} emails sent",
+        "sent_count": sent_count,
+        "errors": errors
+    })
+
+@app.route("/api/send-followup", methods=["POST"])
+@jwt_required()
+def send_followup():
+    data = request.get_json()
+    email_id = data.get("email_id")
+    
+    if not email_id:
+        return jsonify({"error": "Missing email_id"}), 400
+
+    user_id = get_jwt_identity()
+    user = User.query.get(user_id)
+    if not user or not user.email_password:
+        return jsonify({"error": "User not connected with email"}), 400
+
+    # Get the original email record
+    original_email = SentEmail.query.filter_by(id=email_id, user_id=user_id).first()
+    if not original_email:
+        return jsonify({"error": "Email not found"}), 404
+
+    if original_email.followup_sent:
+        return jsonify({"error": "Follow-up already sent"}), 400
+
+    # Send follow-up email
+    followup_body = render_template_string(
+        FOLLOWUP_TEMPLATE,
+        school_name=original_email.school_name,
         user_name=user.name,
-        user_email=user.email,
-        school_email=recipient,
-        school_name=school_name
+        user_email=user.email
     )
 
     try:
-        send_gmail(user, recipient, subject, body)
-        # Log the email in the database
-        new_email = SentEmail(
-            school_name=school_name,
-            school_email=recipient,
-            user_id=user_id,  # Associate email with the user
-            responded=False,
-            followup_sent=False
+        # Configure Flask-Mail for this user
+        app.config['MAIL_USERNAME'] = user.email
+        app.config['MAIL_PASSWORD'] = user.email_password
+        app.config['MAIL_DEFAULT_SENDER'] = user.email
+        
+        msg = Message(
+            subject="Follow-Up: PSA Programs",
+            recipients=[original_email.school_email],
+            body=followup_body,
+            sender=user.email
         )
-        db.session.add(new_email)
+        mail.send(msg)
+        
+        original_email.followup_sent = True
         db.session.commit()
-        return jsonify({"status": "sent"})
+        return jsonify({"status": "follow-up sent"})
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
-scheduler = BackgroundScheduler()
+@app.route("/api/mark-responded", methods=["POST"])
+@jwt_required()
+def mark_responded():
+    data = request.get_json()
+    email_id = data.get("email_id")
+    responded = data.get("responded", True)
+    
+    if not email_id:
+        return jsonify({"error": "Missing email_id"}), 400
 
-def check_for_followups():
-    now = datetime.now()
-    three_days_ago = now - timedelta(days=3)
+    user_id = get_jwt_identity()
+    email_record = SentEmail.query.filter_by(id=email_id, user_id=user_id).first()
+    
+    if not email_record:
+        return jsonify({"error": "Email not found"}), 404
 
-    # Fetch emails that need follow-ups
-    pending_followups = SentEmail.query.filter(
-        SentEmail.sent_at <= three_days_ago,
-        SentEmail.responded == False,
-        SentEmail.followup_sent == False
-    ).all()
-
-    for email in pending_followups:
-        user = User.query.get(email.user_id)  # Get the user who sent the email
-        if not user or not user.gmail_access_token:
-            continue  # Skip if the user is not connected to Gmail
-
-        # Send follow-up email
-        followup_body = render_template_string(
-            FOLLOWUP_TEMPLATE,
-            school_name=email.school_name
-        )
-        send_gmail(user, email.school_email, "Follow-Up: PSA Programs", followup_body)
-        email.followup_sent = True
-        db.session.commit()
-
-# Schedule the task to run daily
-scheduler.add_job(check_for_followups, 'interval', days=1)
-scheduler.start()
-
-def check_email_responses():
-    # Fetch all users with Gmail access tokens
-    users = User.query.filter(User.gmail_access_token.isnot(None)).all()
-
-    for user in users:
-        # Initialize credentials for each user
-        creds = Credentials(
-            token=user.gmail_access_token,
-            refresh_token=user.gmail_refresh_token,
-            token_uri="https://oauth2.googleapis.com/token",
-            client_id=os.getenv("GOOGLE_CLIENT_ID"),
-            client_secret=os.getenv("GOOGLE_CLIENT_SECRET"),
-            scopes=["https://www.googleapis.com/auth/gmail.readonly"]
-        )
-
-        # Build the Gmail API service
-        service = build('gmail', 'v1', credentials=creds)
-
-        # Fetch unread messages from the inbox
-        results = service.users().messages().list(userId='me', q="is:inbox").execute()
-        messages = results.get('messages', [])
-
-        for msg in messages:
-            message = service.users().messages().get(userId='me', id=msg['id']).execute()
-            headers = message['payload']['headers']
-            from_email = next((h['value'] for h in headers if h['name'] == 'From'), None)
-
-            # Match the email to a school in the database
-            email_entry = SentEmail.query.filter_by(school_email=from_email).first()
-            if email_entry:
-                email_entry.responded = True
-                db.session.commit()
+    email_record.responded = responded
+    db.session.commit()
+    return jsonify({"status": "updated"})
 
 
 # --- MAP API ---
@@ -657,20 +697,6 @@ def refresh_map_schools():
         })
         time.sleep(0.1)  # 100ms delay
 
-    reached_out = []
-    for sheet_rows in ALL_SHEET_DATA.values():
-        for row in sheet_rows[1:]:
-            if row and row[0]:
-                school_name = row[0]
-                address = row[6] if len(row) > 6 else None
-                lat, lng = geocode_address(address)
-                reached_out.append({
-                    "name": school_name,
-                    "type": "sheet",
-                    "lat": lat,
-                    "lng": lng
-                })
-    
     rec_geocoded = []
     for site in REC_SITES:
         lat, lng = geocode_address(site["address"])
@@ -685,7 +711,6 @@ def refresh_map_schools():
     MAP_SCHOOL_CACHE = {
         "happyfeet": happy_feet_geocoded,
         "psa": psa_preschools_geocoded,
-        "reached_out": reached_out,
         "rec": rec_geocoded,
     }
     return jsonify({"status": "refreshed"})
@@ -706,4 +731,9 @@ def get_sent_emails():
         }
         for email in emails
     ])
+
+if __name__ == "__main__":
+    with app.app_context():
+        db.create_all()
+    app.run(debug=True)
 
