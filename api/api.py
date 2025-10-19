@@ -7,6 +7,11 @@ import json
 from itertools import permutations
 from math import radians, cos, sin, sqrt, atan2
 import time
+import imaplib
+import email
+from email.header import decode_header
+import ssl
+from datetime import datetime, timedelta
 
 from flask import Flask, request, jsonify, render_template_string
 from flask_mail import Mail, Message
@@ -18,14 +23,14 @@ import gspread
 from oauth2client.service_account import ServiceAccountCredentials
 from google.oauth2 import id_token
 from google.auth.transport import requests as google_requests
-from datetime import datetime, timedelta
 
 from werkzeug.security import generate_password_hash, check_password_hash
 from flask_jwt_extended import (
     JWTManager, create_access_token, jwt_required, get_jwt_identity
 )
 
-
+from apscheduler.schedulers.background import BackgroundScheduler
+import atexit
 
 
 
@@ -208,6 +213,128 @@ def geocode_address(address):
         return position["lat"], position["lng"]
     return None, None
 
+def check_email_replies():
+    """Check for email replies and update the database"""
+    print("Starting email reply check...")
+    
+    # Get all users who have sent emails and have email passwords configured
+    users_with_emails = User.query.filter(
+        User.email_password.isnot(None),
+        User.id.in_(db.session.query(SentEmail.user_id).distinct())
+    ).all()
+    
+    for user in users_with_emails:
+        try:
+            print(f"Checking emails for user: {user.email}")
+            check_user_email_replies(user)
+        except Exception as e:
+            print(f"Error checking emails for {user.email}: {str(e)}")
+    
+    print("Email reply check completed")
+
+def check_user_email_replies(user):
+    """Check email replies for a specific user"""
+    try:
+        # Connect to Gmail IMAP
+        context = ssl.create_default_context()
+        mail = imaplib.IMAP4_SSL("imap.gmail.com", 993, ssl_context=context)
+        mail.login(user.email, user.email_password)
+        
+        # Select inbox
+        mail.select("inbox")
+        
+        # Get emails from the last 7 days
+        since_date = (datetime.utcnow() - timedelta(days=7)).strftime("%d-%b-%Y")
+        
+        # Search for emails
+        status, messages = mail.search(None, f'SINCE {since_date}')
+        
+        if status == "OK":
+            email_ids = messages[0].split()
+            
+            # Get sent emails for this user that haven't been marked as responded
+            sent_emails = SentEmail.query.filter_by(
+                user_id=user.id, 
+                responded=False
+            ).all()
+            
+            # Create a set of school email addresses for quick lookup
+            school_emails = {email.school_email.lower() for email in sent_emails}
+            
+            # Check recent emails
+            for email_id in email_ids[-50:]:  # Check last 50 emails
+                try:
+                    status, msg_data = mail.fetch(email_id, "(RFC822)")
+                    if status == "OK":
+                        email_body = msg_data[0][1]
+                        email_message = email.message_from_bytes(email_body)
+                        
+                        # Get sender email
+                        sender = email_message.get("From", "")
+                        sender_email = extract_email_from_string(sender).lower()
+                        
+                        # Check if this email is from a school we sent to
+                        if sender_email in school_emails:
+                            # Find the corresponding sent email
+                            sent_email = next(
+                                (se for se in sent_emails if se.school_email.lower() == sender_email),
+                                None
+                            )
+                            
+                            if sent_email and not sent_email.responded:
+                                # Get email subject and date
+                                subject = email_message.get("Subject", "")
+                                date_received = email_message.get("Date", "")
+                                
+                                print(f"Found reply from {sender_email} to {user.email}")
+                                print(f"Subject: {subject}")
+                                
+                                # Mark as responded
+                                sent_email.responded = True
+                                db.session.commit()
+                                
+                                print(f"Marked email to {sent_email.school_name} as responded")
+                
+                except Exception as e:
+                    print(f"Error processing email {email_id}: {str(e)}")
+                    continue
+        
+        mail.close()
+        mail.logout()
+        
+    except Exception as e:
+        print(f"Error connecting to email for {user.email}: {str(e)}")
+
+def extract_email_from_string(email_string):
+    """Extract email address from 'Name <email@domain.com>' format"""
+    import re
+    email_pattern = r'<([^>]+)>|([a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,})'
+    match = re.search(email_pattern, email_string)
+    if match:
+        return match.group(1) or match.group(2)
+    return email_string.strip()
+
+# Initialize scheduler
+scheduler = BackgroundScheduler()
+
+def start_scheduler():
+    """Start the background scheduler for checking email replies"""
+    if not scheduler.running:
+        # Check for email replies every 30 minutes
+        scheduler.add_job(
+            func=check_email_replies,
+            trigger="interval",
+            minutes=30,  # Check every 30 minutes
+            id='email_reply_checker'
+        )
+        scheduler.start()
+        print("Email reply checker scheduled to run every 30 minutes")
+        
+        # Shut down the scheduler when exiting the app
+        atexit.register(lambda: scheduler.shutdown())
+
+# Start the scheduler when the app starts
+start_scheduler()
 
 # ====== API ENDPOINTS ======
 
@@ -847,6 +974,31 @@ def delete_sent_email():
         return jsonify({"status": "Email record deleted successfully"})
     except Exception as e:
         return jsonify({"error": str(e)}), 500
+
+@app.route("/api/check-email-replies", methods=["POST"])
+@jwt_required()
+def manual_check_email_replies():
+    """Manually trigger email reply checking"""
+    user_id = get_jwt_identity()
+    user = User.query.get(user_id)
+    
+    if not user:
+        return jsonify({"error": "User not found"}), 404
+    
+    if not user.email_password:
+        return jsonify({"error": "Email settings not configured"}), 400
+    
+    try:
+        if user.admin:
+            # Admin can check all emails
+            check_email_replies()
+            return jsonify({"status": "Checked all user emails for replies"})
+        else:
+            # Regular user can only check their own
+            check_user_email_replies(user)
+            return jsonify({"status": "Checked your emails for replies"})
+    except Exception as e:
+        return jsonify({"error": f"Failed to check emails: {str(e)}"}), 500
 
 if __name__ == "__main__":
     with app.app_context():
