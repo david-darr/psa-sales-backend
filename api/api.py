@@ -538,13 +538,21 @@ def send_email():
     school_ids = data.get("school_ids", [])
     subject = data.get("subject", "Let's Connect! PSA Programs")
     
+    print(f"DEBUG: Received school_ids: {school_ids}")
+    
     if not school_ids:
         return jsonify({"error": "No schools selected"}), 400
 
     user_id = get_jwt_identity()
     user = User.query.get(user_id)
+    print(f"DEBUG: User found: {user.name if user else 'None'}")
+    
     if not user:
         return jsonify({"error": "User not found"}), 400
+    
+    print(f"DEBUG: User email: {user.email}")
+    print(f"DEBUG: User has email_password: {bool(user.email_password)}")
+    print(f"DEBUG: Email password length: {len(user.email_password) if user.email_password else 0}")
     
     if not user.email_password:
         return jsonify({"error": "Email settings not configured"}), 400
@@ -558,6 +566,10 @@ def send_email():
             SalesSchool.user_id == user_id
         ).all()
     
+    print(f"DEBUG: Found {len(schools)} schools to email")
+    for school in schools:
+        print(f"DEBUG: School - {school.school_name}, Email: {school.email}")
+    
     if not schools:
         return jsonify({"error": "No valid schools found"}), 400
 
@@ -566,6 +578,8 @@ def send_email():
 
     for school in schools:
         try:
+            print(f"DEBUG: Processing school: {school.school_name}")
+            
             # Create email body
             body = render_template_string(
                 EMAIL_TEMPLATE,
@@ -574,20 +588,40 @@ def send_email():
                 school_name=school.school_name,
                 contact_name=school.contact_name or "Director/Administrator"
             )
+            print(f"DEBUG: Email body created for {school.school_name}")
 
             # Configure Flask-Mail for this user
+            print(f"DEBUG: Configuring mail with:")
+            print(f"  - MAIL_USERNAME: {user.email}")
+            print(f"  - MAIL_PASSWORD: {'*' * len(user.email_password)}")
+            print(f"  - MAIL_SERVER: smtp.gmail.com")
+            print(f"  - MAIL_PORT: 587")
+            print(f"  - MAIL_USE_TLS: True")
+            
+            # Reconfigure mail settings for this user
             app.config['MAIL_USERNAME'] = user.email
             app.config['MAIL_PASSWORD'] = user.email_password
             app.config['MAIL_DEFAULT_SENDER'] = user.email
+            app.config['MAIL_SERVER'] = 'smtp.gmail.com'
+            app.config['MAIL_PORT'] = 587
+            app.config['MAIL_USE_TLS'] = True
+            app.config['MAIL_USE_SSL'] = False
             
-            # Send email
+            # Reinitialize mail with new config
+            mail.init_app(app)
+            
+            print(f"DEBUG: Creating message...")
             msg = Message(
                 subject=subject,
                 recipients=[school.email],
                 body=body,
                 sender=user.email
             )
+            print(f"DEBUG: Message created, attempting to send to {school.email}...")
+            
+            # Try to send the email
             mail.send(msg)
+            print(f"DEBUG: Email sent successfully to {school.email}")
             
             # Log the email
             new_email = SentEmail(
@@ -605,16 +639,29 @@ def send_email():
             sent_count += 1
             
         except Exception as e:
-            errors.append(f"Failed to send to {school.school_name}: {str(e)}")
+            error_msg = f"Failed to send to {school.school_name}: {type(e).__name__}: {str(e)}"
+            print(f"DEBUG ERROR: {error_msg}")
+            errors.append(error_msg)
+            
+            # Print full traceback for debugging
+            import traceback
+            print(f"DEBUG TRACEBACK:")
+            traceback.print_exc()
     
-    db.session.commit()
+    try:
+        db.session.commit()
+        print(f"DEBUG: Database committed successfully")
+    except Exception as e:
+        print(f"DEBUG: Database commit error: {str(e)}")
     
-    return jsonify({
-        "status": f"{sent_count} emails sent",
+    result = {
+        "status": f"{sent_count} emails sent" if sent_count > 0 else "Failed to send emails",
         "sent_count": sent_count,
         "errors": errors
-    })
-
+    }
+    print(f"DEBUG: Final result: {result}")
+    
+    return jsonify(result)
 @app.route("/api/send-followup", methods=["POST"])
 @jwt_required()
 def send_followup():
