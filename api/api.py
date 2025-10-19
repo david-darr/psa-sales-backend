@@ -235,6 +235,8 @@ def check_email_replies():
 def check_user_email_replies(user):
     """Check email replies for a specific user"""
     try:
+        print(f"DEBUG: Starting email check for {user.email}")
+        
         # Connect to Gmail IMAP
         context = ssl.create_default_context()
         mail = imaplib.IMAP4_SSL("imap.gmail.com", 993, ssl_context=context)
@@ -245,12 +247,14 @@ def check_user_email_replies(user):
         
         # Get emails from the last 7 days
         since_date = (datetime.utcnow() - timedelta(days=7)).strftime("%d-%b-%Y")
+        print(f"DEBUG: Searching for emails since {since_date}")
         
         # Search for emails
         status, messages = mail.search(None, f'SINCE {since_date}')
         
         if status == "OK":
             email_ids = messages[0].split()
+            print(f"DEBUG: Found {len(email_ids)} emails in inbox")
             
             # Get sent emails for this user that haven't been marked as responded
             sent_emails = SentEmail.query.filter_by(
@@ -258,8 +262,15 @@ def check_user_email_replies(user):
                 responded=False
             ).all()
             
-            # Create a set of school email addresses for quick lookup
-            school_emails = {email.school_email.lower() for email in sent_emails}
+            print(f"DEBUG: Found {len(sent_emails)} unresponded sent emails")
+            
+            # Create a dictionary of school email addresses for quick lookup
+            school_emails = {}
+            for sent_email in sent_emails:
+                school_emails[sent_email.school_email.lower()] = sent_email
+                print(f"DEBUG: Watching for replies from: {sent_email.school_email}")
+            
+            replies_found = 0
             
             # Check recent emails
             for email_id in email_ids[-50:]:  # Check last 50 emails
@@ -272,47 +283,129 @@ def check_user_email_replies(user):
                         # Get sender email
                         sender = email_message.get("From", "")
                         sender_email = extract_email_from_string(sender).lower()
+                        subject = email_message.get("Subject", "")
+                        
+                        print(f"DEBUG: Checking email from {sender_email} with subject: {subject}")
                         
                         # Check if this email is from a school we sent to
                         if sender_email in school_emails:
-                            # Find the corresponding sent email
-                            sent_email = next(
-                                (se for se in sent_emails if se.school_email.lower() == sender_email),
-                                None
-                            )
+                            sent_email = school_emails[sender_email]
                             
-                            if sent_email and not sent_email.responded:
-                                # Get email subject and date
-                                subject = email_message.get("Subject", "")
-                                date_received = email_message.get("Date", "")
-                                
-                                print(f"Found reply from {sender_email} to {user.email}")
-                                print(f"Subject: {subject}")
+                            # More strict reply detection
+                            is_reply = False
+
+                            # Check 1: Subject line indicates it's a reply
+                            if (subject.lower().startswith("re:") or 
+                                subject.lower().startswith("fwd:") or
+                                "re:" in subject.lower()):
+                                is_reply = True
+                                print(f"DEBUG: Reply detected via subject line: {subject}")
+
+                            # Check 2: Look for email threading (In-Reply-To header)
+                            elif email_message.get("In-Reply-To") or email_message.get("References"):
+                                is_reply = True
+                                print(f"DEBUG: Reply detected via email threading headers")
+
+                            # Check 3: Content analysis - look for quoted text or greeting patterns
+                            else:
+                                try:
+                                    email_content = email_message.get_payload(decode=True).decode('utf-8', errors='ignore').lower()
+                                    reply_indicators = [
+                                        "thank you for your email",
+                                        "thanks for reaching out", 
+                                        "thank you for contacting",
+                                        "interested in your",
+                                        "would like to learn more",
+                                        "please send me more information",
+                                        "we are interested",
+                                        "> on",  # Quoted text indicator
+                                        "wrote:",  # Another quoted text indicator
+                                        "sent from my"  # Mobile signature
+                                    ]
+                                    
+                                    if any(phrase in email_content for phrase in reply_indicators):
+                                        is_reply = True
+                                        print(f"DEBUG: Reply detected via content analysis")
+                                    else:
+                                        print(f"DEBUG: Email content doesn't indicate a reply")
+                                        
+                                except Exception as e:
+                                    print(f"DEBUG: Could not analyze email content: {str(e)}")
+
+                            print(f"DEBUG: Final reply decision - Subject: '{subject}', Is_Reply: {is_reply}")
+                            # ====== END UPDATED VALIDATION ======
+                            
+                            # Check the date - must be after we sent our email
+                            email_date = email_message.get("Date", "")
+                            try:
+                                from email.utils import parsedate_to_datetime
+                                received_date = parsedate_to_datetime(email_date)
+                                if received_date <= sent_email.sent_at:
+                                    print(f"DEBUG: Email date {received_date} is before sent date {sent_email.sent_at}, skipping")
+                                    continue
+                            except:
+                                print(f"DEBUG: Could not parse email date: {email_date}")
+                                continue
+                            
+                            if is_reply:
+                                print(f"DEBUG: CONFIRMED REPLY from {sender_email} to {user.email}")
+                                print(f"DEBUG: Subject: {subject}")
                                 
                                 # Mark as responded
                                 sent_email.responded = True
-                                db.session.commit()
+                                replies_found += 1
                                 
-                                print(f"Marked email to {sent_email.school_name} as responded")
+                                print(f"DEBUG: Marked email to {sent_email.school_name} as responded")
+                            else:
+                                print(f"DEBUG: Email from {sender_email} doesn't appear to be a reply (subject: {subject})")
                 
                 except Exception as e:
-                    print(f"Error processing email {email_id}: {str(e)}")
+                    print(f"DEBUG: Error processing email {email_id}: {str(e)}")
                     continue
+            
+            if replies_found > 0:
+                db.session.commit()
+                print(f"DEBUG: Found and marked {replies_found} replies")
+            else:
+                print(f"DEBUG: No new replies found")
         
         mail.close()
         mail.logout()
         
     except Exception as e:
-        print(f"Error connecting to email for {user.email}: {str(e)}")
+        print(f"DEBUG: Error connecting to email for {user.email}: {str(e)}")
+        import traceback
+        traceback.print_exc()
 
 def extract_email_from_string(email_string):
     """Extract email address from 'Name <email@domain.com>' format"""
     import re
-    email_pattern = r'<([^>]+)>|([a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,})'
-    match = re.search(email_pattern, email_string)
-    if match:
-        return match.group(1) or match.group(2)
-    return email_string.strip()
+    
+    # Handle multiple formats
+    # 1. Name <email@domain.com>
+    # 2. email@domain.com
+    # 3. "Name" <email@domain.com>
+    
+    print(f"DEBUG: Extracting email from: {email_string}")
+    
+    # Try to find email in angle brackets first
+    bracket_match = re.search(r'<([^>]+)>', email_string)
+    if bracket_match:
+        email = bracket_match.group(1).strip()
+        print(f"DEBUG: Found email in brackets: {email}")
+        return email
+    
+    # Try to find standalone email
+    email_match = re.search(r'([a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,})', email_string)
+    if email_match:
+        email = email_match.group(1).strip()
+        print(f"DEBUG: Found standalone email: {email}")
+        return email
+    
+    # If nothing found, return the original string cleaned up
+    result = email_string.strip()
+    print(f"DEBUG: No email pattern found, returning: {result}")
+    return result
 
 # Initialize scheduler
 scheduler = BackgroundScheduler()
@@ -723,7 +816,6 @@ def send_email():
             print(f"  - MAIL_PASSWORD: {'*' * len(user.email_password)}")
             print(f"  - MAIL_SERVER: smtp.gmail.com")
             print(f"  - MAIL_PORT: 587")
-            print(f"  - MAIL_USE_TLS: True")
             
             # Reconfigure mail settings for this user
             app.config['MAIL_USERNAME'] = user.email
