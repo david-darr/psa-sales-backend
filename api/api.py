@@ -535,7 +535,7 @@ https://thepsasports.com
 @jwt_required()
 def send_email():
     data = request.get_json()
-    school_ids = data.get("school_ids", [])  # List of school IDs to send to
+    school_ids = data.get("school_ids", [])
     subject = data.get("subject", "Let's Connect! PSA Programs")
     
     if not school_ids:
@@ -549,11 +549,14 @@ def send_email():
     if not user.email_password:
         return jsonify({"error": "Email settings not configured"}), 400
 
-    # Get selected schools
-    schools = SalesSchool.query.filter(
-        SalesSchool.id.in_(school_ids),
-        SalesSchool.user_id == user_id
-    ).all()
+    # Get selected schools - admins can email any school, regular users only their own
+    if user.admin:
+        schools = SalesSchool.query.filter(SalesSchool.id.in_(school_ids)).all()
+    else:
+        schools = SalesSchool.query.filter(
+            SalesSchool.id.in_(school_ids),
+            SalesSchool.user_id == user_id
+        ).all()
     
     if not schools:
         return jsonify({"error": "No valid schools found"}), 400
