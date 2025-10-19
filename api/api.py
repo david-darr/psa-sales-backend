@@ -1,144 +1,106 @@
-# ===== IMPORTS ======
+# ====================================================
+# IMPORTS & EXTERNAL LIBRARIES
+# ====================================================
 
 import os
 import requests
 import re
 import json
-from itertools import permutations
-from math import radians, cos, sin, sqrt, atan2
 import time
 import imaplib
 import email
-from email.header import decode_header
 import ssl
 import pytz
+import atexit
+import logging
+from itertools import permutations
+from math import radians, cos, sin, sqrt, atan2
 from datetime import datetime, timedelta
 
+# Flask & Extensions
 from flask import Flask, request, jsonify, render_template_string
 from flask_mail import Mail, Message
 from flask_sqlalchemy import SQLAlchemy
 from flask_cors import CORS
-from dotenv import load_dotenv
-
-import gspread
-from oauth2client.service_account import ServiceAccountCredentials
-from google.oauth2 import id_token
-from google.auth.transport import requests as google_requests
-
-from werkzeug.security import generate_password_hash, check_password_hash
 from flask_jwt_extended import (
     JWTManager, create_access_token, jwt_required, get_jwt_identity
 )
 
+# Third-party Services
+import gspread
+from oauth2client.service_account import ServiceAccountCredentials
+from google.oauth2 import id_token
+from google.auth.transport import requests as google_requests
+from dotenv import load_dotenv
+
+# Security & Scheduling
+from werkzeug.security import generate_password_hash, check_password_hash
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.executors.pool import ThreadPoolExecutor
-import atexit
-import logging
 
-# Configure logging for scheduler
-logging.basicConfig(level=logging.INFO)
-scheduler_logger = logging.getLogger('apscheduler')
+# ====================================================
+# ENVIRONMENT & CONFIGURATION
+# ====================================================
 
-# Initialize scheduler with better configuration
-executors = {
-    'default': ThreadPoolExecutor(20)
-}
-job_defaults = {
-    'coalesce': False,
-    'max_instances': 1,
-    'misfire_grace_time': 300  # 5 minutes grace period
-}
-
-scheduler = BackgroundScheduler(
-    executors=executors,
-    job_defaults=job_defaults,
-    timezone='UTC'
-)
-
-
-
-
-# ====== ENVIRONMENT & APP SETUP ======
 load_dotenv()
 GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
 
+# ====================================================
+# FLASK APP INITIALIZATION
+# ====================================================
+
 app = Flask(__name__)
+
+# CORS Configuration
 CORS(app, supports_credentials=True, origins=[
     "https://psasales-6l22ucils-david-darrs-projects.vercel.app",
     "https://www.salespsa.com",
     "https://salespsa.com"
 ])
 
-# ====== DATABASE CONFIGURATION ======
+# Database Configuration
 app.config['SQLALCHEMY_DATABASE_URI'] = (
     'postgresql://postgres.dlnfvtudzyyabixedniz:Pandaplayz6!@aws-0-us-east-1.pooler.supabase.com:6543/postgres'
 )
 db = SQLAlchemy(app)
 
-# ====== JWT AUTHENTICATION SETUP ======
+# JWT Configuration
 app.config["JWT_SECRET_KEY"] = os.getenv("JWT_SECRET_KEY")
 jwt = JWTManager(app)
 
-# ====== GOOGLE SHEETS LOADING ======
-# Sheet of Happy Feet and PSA Schools
-def load_PSA_school_sheet():
-    """Load the new Google Sheet for PSA Preschools and Happy Feet."""
-    scope = ['https://spreadsheets.google.com/feeds', 'https://www.googleapis.com/auth/drive']
-    service_account_json = os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON")
-    service_account_info = json.loads(service_account_json)
-    service_account_info["private_key"] = service_account_info["private_key"].replace("\\n", "\n")
-    creds = ServiceAccountCredentials.from_json_keyfile_dict(service_account_info, scope)
-    client = gspread.authorize(creds)
-    sheet = client.open('PSA Preschools')  # <-- change to your new sheet name
-    worksheet = sheet.sheet1
-    rows = worksheet.get_all_values()
-    return rows
+# Mail Configuration
+app.config['MAIL_SERVER'] = 'smtp.gmail.com'
+app.config['MAIL_PORT'] = 587
+app.config['MAIL_USE_TLS'] = True
+app.config['MAIL_USERNAME'] = os.getenv("MAIL_USERNAME")
+app.config['MAIL_PASSWORD'] = os.getenv("MAIL_PASSWORD")
+app.config['MAIL_DEFAULT_SENDER'] = os.getenv("MAIL_USERNAME")
+mail = Mail(app)
 
-def split_sheet_schools(sheet_rows):
-    """
-    Splits sheet rows into PSA Preschools and Happy Feet schools based on indicator rows.
-    PSA Preschools: column 2 is name, column 14 is address.
-    Happy Feet: column 2 is name, column 15 is address.
-    """
-    psa_preschools = []
-    happy_feet = []
-    mode = None  # None, "psa", "happyfeet"
-    for row in sheet_rows:
-        if len(row) < 15:
-            continue
-        indicator = str(row[1]).strip().lower()
-        if indicator == "northern virginia (psa)":
-            mode = "psa"
-            continue
-        elif indicator == "northern virginia (happyfeet)":
-            mode = "happyfeet"
-            continue
-        if mode == "psa":
-            name = str(row[1]).strip()
-            address = str(row[13]).strip()
-            if not name or not address or name.lower() in {"school name", "elementary", "preschool"}:
-                continue
-            psa_preschools.append({"name": name, "address": address})
-        elif mode == "happyfeet":
-            name = str(row[1]).strip()
-            address = str(row[14]).strip()
-            if not name or not address or name.lower() in {"school name", "elementary", "preschool"}:
-                continue
-            happy_feet.append({"name": name, "address": address})
-    return psa_preschools, happy_feet
+# ====================================================
+# DATABASE MODELS
+# ====================================================
 
-# Cached sheet data (refreshed via endpoint)
-psa_preschools, happy_feet = split_sheet_schools(load_PSA_school_sheet())
+class User(db.Model):
+    __tablename__ = 'users'
+    id = db.Column(db.Integer, primary_key=True)
+    name = db.Column(db.String, nullable=False)
+    email = db.Column(db.String, unique=True, nullable=False)
+    phone = db.Column(db.String, nullable=True)
+    password_hash = db.Column(db.String, nullable=False)
+    admin = db.Column(db.Boolean, nullable=False, default=False)
+    
+    # Email settings for sending emails
+    email_password = db.Column(db.String, nullable=True)  # App password for Gmail
+    smtp_server = db.Column(db.String, default='smtp.gmail.com')
+    smtp_port = db.Column(db.Integer, default=587)
 
-REC_SITES = [
-    {"name": "Hanson Park", "address": "22831 Hanson Park Dr, Aldie, VA 20105"},
-    {"name": "Heron Overlook", "address": "20550 Heron overlook Plz, Ashburn, VA 20147"}
-]
+    def set_password(self, password):
+        self.password_hash = generate_password_hash(password)
+    
+    def check_password(self, password):
+        return check_password_hash(self.password_hash, password)
 
-GENERIC_NAMES = {"elementary", "preschool", "school name", "elementary school"}
-
-
-# ====== DATABASE MODELS ======
 class School(db.Model):
     __tablename__ = 'schools'
     id = db.Column(db.Integer, primary_key=True)
@@ -156,32 +118,12 @@ class SalesSchool(db.Model):
     email = db.Column(db.String, nullable=False)
     phone = db.Column(db.String, nullable=True)
     address = db.Column(db.String, nullable=True)
-    status = db.Column(db.String, default='pending')  # pending, contacted, responded, etc.
+    status = db.Column(db.String, default='pending')
     notes = db.Column(db.Text, nullable=True)
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
     user_id = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=False)
     
     user = db.relationship('User', backref=db.backref('sales_schools', lazy=True))
-
-# ====== USER MODELS ======
-class User(db.Model):
-    __tablename__ = 'users'
-    id = db.Column(db.Integer, primary_key=True)
-    name = db.Column(db.String, nullable=False)
-    email = db.Column(db.String, unique=True, nullable=False)
-    phone = db.Column(db.String, nullable=True)
-    password_hash = db.Column(db.String, nullable=False)
-    admin = db.Column(db.Boolean, nullable=False, default=False)
-    
-    # Email settings for sending emails
-    email_password = db.Column(db.String, nullable=True)  # App password for Gmail
-    smtp_server = db.Column(db.String, default='smtp.gmail.com')
-    smtp_port = db.Column(db.Integer, default=587)
-
-    def set_password(self, password):
-        self.password_hash = generate_password_hash(password)
-    def check_password(self, password):
-        return check_password_hash(self.password_hash, password)
 
 class SentEmail(db.Model):
     __tablename__ = 'sent_emails'
@@ -195,16 +137,75 @@ class SentEmail(db.Model):
 
     user = db.relationship('User', backref=db.backref('sent_emails', lazy=True))
 
-# ====== MAIL CONFIGURATION ======
-app.config['MAIL_SERVER'] = 'smtp.gmail.com'  # or your SMTP server
-app.config['MAIL_PORT'] = 587
-app.config['MAIL_USE_TLS'] = True
-app.config['MAIL_USERNAME'] = os.getenv("MAIL_USERNAME")  # your server email
-app.config['MAIL_PASSWORD'] = os.getenv("MAIL_PASSWORD")  # your server email password or app password
-app.config['MAIL_DEFAULT_SENDER'] = os.getenv("MAIL_USERNAME")
-mail = Mail(app)
+# ====================================================
+# GOOGLE SHEETS DATA MANAGEMENT
+# ====================================================
 
-# ====== UTILITY FUNCTIONS ======
+def load_PSA_school_sheet():
+    """Load the new Google Sheet for PSA Preschools and Happy Feet."""
+    scope = ['https://spreadsheets.google.com/feeds', 'https://www.googleapis.com/auth/drive']
+    service_account_json = os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON")
+    service_account_info = json.loads(service_account_json)
+    service_account_info["private_key"] = service_account_info["private_key"].replace("\\n", "\n")
+    creds = ServiceAccountCredentials.from_json_keyfile_dict(service_account_info, scope)
+    client = gspread.authorize(creds)
+    sheet = client.open('PSA Preschools')
+    worksheet = sheet.sheet1
+    rows = worksheet.get_all_values()
+    return rows
+
+def split_sheet_schools(sheet_rows):
+    """
+    Splits sheet rows into PSA Preschools and Happy Feet schools based on indicator rows.
+    PSA Preschools: column 2 is name, column 14 is address.
+    Happy Feet: column 2 is name, column 15 is address.
+    """
+    psa_preschools = []
+    happy_feet = []
+    mode = None  # None, "psa", "happyfeet"
+    
+    for row in sheet_rows:
+        if len(row) < 15:
+            continue
+        indicator = str(row[1]).strip().lower()
+        if indicator == "northern virginia (psa)":
+            mode = "psa"
+            continue
+        elif indicator == "northern virginia (happyfeet)":
+            mode = "happyfeet"
+            continue
+        
+        if mode == "psa":
+            name = str(row[1]).strip()
+            address = str(row[13]).strip()
+            if not name or not address or name.lower() in {"school name", "elementary", "preschool"}:
+                continue
+            psa_preschools.append({"name": name, "address": address})
+        elif mode == "happyfeet":
+            name = str(row[1]).strip()
+            address = str(row[14]).strip()
+            if not name or not address or name.lower() in {"school name", "elementary", "preschool"}:
+                continue
+            happy_feet.append({"name": name, "address": address})
+    
+    return psa_preschools, happy_feet
+
+# Initialize cached sheet data
+psa_preschools, happy_feet = split_sheet_schools(load_PSA_school_sheet())
+
+# Constants
+REC_SITES = [
+    {"name": "Hanson Park", "address": "22831 Hanson Park Dr, Aldie, VA 20105"},
+    {"name": "Heron Overlook", "address": "20550 Heron overlook Plz, Ashburn, VA 20147"}
+]
+
+GENERIC_NAMES = {"elementary", "preschool", "school name", "elementary school"}
+MAP_SCHOOL_CACHE = {}
+
+# ====================================================
+# UTILITY FUNCTIONS
+# ====================================================
+
 def normalize_name(name):
     """Lowercase, remove non-alphanumeric, and extra spaces for fuzzy matching."""
     if not name:
@@ -224,6 +225,7 @@ def haversine(lat1, lng1, lat2, lng2):
     return R * c
 
 def geocode_address(address):
+    """Geocode an address using HERE API."""
     if not address:
         return None, None
     HERE_API_KEY = os.getenv("HERE_API_KEY")
@@ -236,9 +238,36 @@ def geocode_address(address):
         return position["lat"], position["lng"]
     return None, None
 
+def extract_email_from_string(email_string):
+    """Extract email address from 'Name <email@domain.com>' format"""
+    print(f"DEBUG: Extracting email from: {email_string}")
+    
+    # Try to find email in angle brackets first
+    bracket_match = re.search(r'<([^>]+)>', email_string)
+    if bracket_match:
+        email = bracket_match.group(1).strip()
+        print(f"DEBUG: Found email in brackets: {email}")
+        return email
+    
+    # Try to find standalone email
+    email_match = re.search(r'([a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,})', email_string)
+    if email_match:
+        email = email_match.group(1).strip()
+        print(f"DEBUG: Found standalone email: {email}")
+        return email
+    
+    # If nothing found, return the original string cleaned up
+    result = email_string.strip()
+    print(f"DEBUG: No email pattern found, returning: {result}")
+    return result
+
+# ====================================================
+# EMAIL REPLY CHECKING SYSTEM
+# ====================================================
+
 def check_email_replies():
     """Check for email replies and update the database"""
-    with app.app_context():  # This is the key fix!
+    with app.app_context():
         start_time = datetime.utcnow()
         print(f"=== AUTOMATIC EMAIL REPLY CHECK STARTED at {start_time} ===")
         
@@ -358,11 +387,9 @@ def check_user_email_replies(user):
                                 sent_at = sent_email.sent_at
                                 if sent_at.tzinfo is None and received_date.tzinfo is not None:
                                     # Make sent_at timezone-aware to match received_date
-                                    import pytz
                                     sent_at = pytz.UTC.localize(sent_at)
                                 elif sent_at.tzinfo is not None and received_date.tzinfo is None:
                                     # Make received_date timezone-aware to match sent_at
-                                    import pytz
                                     received_date = pytz.UTC.localize(received_date)
                                 
                                 if received_date <= sent_at:
@@ -409,37 +436,24 @@ def check_user_email_replies(user):
         import traceback
         traceback.print_exc()
 
-def extract_email_from_string(email_string):
-    """Extract email address from 'Name <email@domain.com>' format"""
-    import re
-    
-    # Handle multiple formats
-    # 1. Name <email@domain.com>
-    # 2. email@domain.com
-    # 3. "Name" <email@domain.com>
-    
-    print(f"DEBUG: Extracting email from: {email_string}")
-    
-    # Try to find email in angle brackets first
-    bracket_match = re.search(r'<([^>]+)>', email_string)
-    if bracket_match:
-        email = bracket_match.group(1).strip()
-        print(f"DEBUG: Found email in brackets: {email}")
-        return email
-    
-    # Try to find standalone email
-    email_match = re.search(r'([a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,})', email_string)
-    if email_match:
-        email = email_match.group(1).strip()
-        print(f"DEBUG: Found standalone email: {email}")
-        return email
-    
-    # If nothing found, return the original string cleaned up
-    result = email_string.strip()
-    print(f"DEBUG: No email pattern found, returning: {result}")
-    return result
+# ====================================================
+# SCHEDULER CONFIGURATION
+# ====================================================
 
-# Initialize scheduler
+# Configure logging for scheduler
+logging.basicConfig(level=logging.INFO)
+scheduler_logger = logging.getLogger('apscheduler')
+
+# Initialize scheduler with better configuration
+executors = {
+    'default': ThreadPoolExecutor(20)
+}
+job_defaults = {
+    'coalesce': False,
+    'max_instances': 1,
+    'misfire_grace_time': 300  # 5 minutes grace period
+}
+
 scheduler = BackgroundScheduler(
     executors=executors,
     job_defaults=job_defaults,
@@ -487,9 +501,57 @@ def start_scheduler():
 scheduler_started = start_scheduler()
 print(f"Scheduler initialization: {'✅ Success' if scheduler_started else '❌ Failed'}")
 
-# ====== API ENDPOINTS ======
+# ====================================================
+# EMAIL TEMPLATES
+# ====================================================
 
-# --- USER API ---
+EMAIL_TEMPLATE = """
+Hi {{ contact_name }},
+
+My name is {{ user_name }}, and I'm with The Players Sports Academy (PSA) — a nonprofit organization offering fun, convenient sports activities for preschool students ages 2-5 right on campus during the school day. 
+
+It was a pleasure learning about {{ school_name }}! I'd love to share information about our on-site sports programs.
+
+PSA TOTS currently works with over 60 preschools in the Northern Virginia area, providing quality sports programs designed specifically for young learners.
+
+Here's why schools and families love working with PSA:
+• On-site convenience - Programs run during school hours with no extra work for your team
+• All equipment provided - I bring everything needed for each session
+• Flexible scheduling - Programs available seasonally or year-round
+• Variety of activities - Soccer, Basketball, T-Ball, and Yoga designed for young learners
+• Fundraising opportunity - Schools can raise funds through the programs
+
+We would love to set up a free demo session so your students can experience the fun firsthand!
+
+Would you be open to a quick call or meeting to discuss the details? Please let me know a date and time that works best for you.
+
+Thank you for your time, and I look forward to the opportunity to work together!
+
+Best regards,
+{{ user_name }}
+Sales Associate and Coach
+{{ user_email }}
+https://thepsasports.com
+"""
+
+FOLLOWUP_TEMPLATE = """
+Hi there,
+
+I wanted to follow up on my previous email regarding PSA's on-site sports programs for {{ school_name }}. We would love to set up a free demo session for your students to experience the fun firsthand.
+
+Please let me know if you have any questions or would like to schedule a quick call to discuss further.
+
+Best regards,  
+{{ user_name }}  
+Sales Associate and Coach  
+{{ user_email }}
+https://thepsasports.com
+"""
+
+# ====================================================
+# API ENDPOINTS - USER AUTHENTICATION
+# ====================================================
+
 @app.route("/api/register", methods=["POST"])
 def register():
     data = request.get_json()
@@ -547,6 +609,10 @@ def profile():
         "admin": user.admin
     })
 
+# ====================================================
+# API ENDPOINTS - EMAIL SETTINGS
+# ====================================================
+
 @app.route("/api/email-settings", methods=["POST"])
 @jwt_required()
 def save_email_settings():
@@ -566,6 +632,35 @@ def save_email_settings():
     db.session.commit()
     
     return jsonify({"message": "Email settings saved"})
+
+@app.route("/api/check-email-replies", methods=["POST"])
+@jwt_required()
+def manual_check_email_replies():
+    """Manually trigger email reply checking"""
+    user_id = get_jwt_identity()
+    user = User.query.get(user_id)
+    
+    if not user:
+        return jsonify({"error": "User not found"}), 404
+    
+    if not user.email_password:
+        return jsonify({"error": "Email settings not configured"}), 400
+    
+    try:
+        if user.admin:
+            # Admin can check all emails
+            check_email_replies()
+            return jsonify({"status": "Checked all user emails for replies"})
+        else:
+            # Regular user can only check their own
+            check_user_email_replies(user)
+            return jsonify({"status": "Checked your emails for replies"})
+    except Exception as e:
+        return jsonify({"error": f"Failed to check emails: {str(e)}"}), 500
+
+# ====================================================
+# API ENDPOINTS - SCHOOL MANAGEMENT
+# ====================================================
 
 @app.route("/api/add-school", methods=["POST"])
 @jwt_required()
@@ -631,12 +726,11 @@ def get_my_schools():
             "status": school.status,
             "notes": school.notes,
             "created_at": school.created_at,
-            "user_name": school.user.name if hasattr(school, 'user') else None  # Show which user added it
+            "user_name": school.user.name if hasattr(school, 'user') else None
         }
         for school in schools
     ])
 
-# --- School List API ---
 @app.route("/api/schools", methods=["GET"])
 def get_schools():
     """Return all schools from the database."""
@@ -646,168 +740,9 @@ def get_schools():
         for s in schools
     ])
 
-# --- School Finder API ---
-@app.route("/api/find-schools", methods=["POST"])
-def find_schools():
-    data = request.get_json()
-    address = data.get("address")
-    keywords = data.get("keywords", ["elementary school", "day care", "preschool", "kindercare", "montessori"])
-    if not address:
-        return jsonify({"error": "No address provided"}), 400
-
-    # If address is a zip code or a city, append "USA" to prioritize US geocoding
-    if re.fullmatch(r"\d{5}", address.strip()):
-        address = f"{address.strip()} USA"
-    elif re.fullmatch(r"[a-zA-Z ]+", address.strip()):
-        address = f"{address.strip()} USA"
-
-    # Get normalized names of schools we already do business with
-    happy_feet_names = set([normalize_name(s["name"]) for s in happy_feet])
-    psa_names = set([normalize_name(s["name"]) for s in psa_preschools])
-    excluded_names = happy_feet_names | psa_names
-
-    # Geocode the address
-    lat, lng = geocode_address(address)
-    if lat is None or lng is None:
-        return jsonify({"error": "Address not found"}), 404
-    location = {"lat": lat, "lng": lng}
-
-    # Find nearby schools using Places API
-    places_url = "https://maps.googleapis.com/maps/api/place/nearbysearch/json"
-    base_params = {
-        "location": f"{location['lat']},{location['lng']}",
-        "radius": 5000,
-        "key": GOOGLE_API_KEY
-    }
-
-    results = []
-    for place_type in ["school"]:
-        for kw in keywords:
-            params = base_params.copy()
-            params["type"] = place_type
-            params["keyword"] = kw
-            resp = requests.get(places_url, params=params).json()
-            results.extend(resp.get("results", []))
-
-    # Remove duplicates by place_id
-    unique = {}
-    for result in results:
-        pid = result.get("place_id")
-        if pid and pid not in unique:
-            unique[pid] = result
-
-    # Filter out schools that are already in Happy Feet or PSA tables (fuzzy match)
-    schools = []
-    for result in unique.values():
-        school_name = result.get("name", "")
-        norm_name = normalize_name(school_name)
-        if any(norm_name == ex or norm_name in ex or ex in norm_name for ex in excluded_names):
-            continue
-        schools.append({
-            "name": result.get("name"),
-            "address": result.get("vicinity"),
-            "lat": result["geometry"]["location"]["lat"],
-            "lng": result["geometry"]["location"]["lng"],
-            "place_id": result.get("place_id")
-        })
-
-    return jsonify({
-        "schools": schools,
-        "location": location,
-        "google_api_key": GOOGLE_API_KEY
-    })
-
-# --- Route Planning API ---
-@app.route("/api/route-plan", methods=["POST"])
-def route_plan():
-    """Calculate shortest route visiting all selected schools."""
-    data = request.get_json()
-    schools = data.get("schools", [])
-    start_address = data.get("start_address")
-    if len(schools) < 2:
-        return jsonify({"error": "Select at least two schools"}), 400
-    if not start_address:
-        return jsonify({"error": "No starting address provided"}), 400
-
-    # Geocode the starting address
-    start_lat, start_lng = geocode_address(start_address)
-    if start_lat is None or start_lng is None:
-        return jsonify({"error": "Starting address not found"}), 404
-
-    # Build distance matrix (from start to each school, and between schools)
-    n = len(schools)
-    dist = [[0]*n for _ in range(n)]
-    for i in range(n):
-        for j in range(n):
-            if i != j:
-                dist[i][j] = haversine(
-                    schools[i]["lat"], schools[i]["lng"],
-                    schools[j]["lat"], schools[j]["lng"]
-                )
-
-    # Calculate distance from start to each school
-    start_to_school = [
-        haversine(start_lat, start_lng, s["lat"], s["lng"]) for s in schools
-    ]
-
-    # Brute-force TSP starting from start location
-    indices = list(range(n))
-    min_order = None
-    min_dist = float('inf')
-    for perm in permutations(indices):
-        d = start_to_school[perm[0]]  # from start to first school
-        d += sum(dist[perm[i]][perm[i+1]] for i in range(n-1))
-        if d < min_dist:
-            min_dist = d
-            min_order = perm
-
-    route = [schools[i]["place_id"] for i in min_order]
-    return jsonify({"route": route})
-
-
-# --- Email API ---
-EMAIL_TEMPLATE = """
-Hi {{ contact_name }},
-
-My name is {{ user_name }}, and I'm with The Players Sports Academy (PSA) — a nonprofit organization offering fun, convenient sports activities for preschool students ages 2-5 right on campus during the school day. 
-
-It was a pleasure learning about {{ school_name }}! I'd love to share information about our on-site sports programs.
-
-PSA TOTS currently works with over 60 preschools in the Northern Virginia area, providing quality sports programs designed specifically for young learners.
-
-Here's why schools and families love working with PSA:
-• On-site convenience - Programs run during school hours with no extra work for your team
-• All equipment provided - I bring everything needed for each session
-• Flexible scheduling - Programs available seasonally or year-round
-• Variety of activities - Soccer, Basketball, T-Ball, and Yoga designed for young learners
-• Fundraising opportunity - Schools can raise funds through the programs
-
-We would love to set up a free demo session so your students can experience the fun firsthand!
-
-Would you be open to a quick call or meeting to discuss the details? Please let me know a date and time that works best for you.
-
-Thank you for your time, and I look forward to the opportunity to work together!
-
-Best regards,
-{{ user_name }}
-Sales Associate and Coach
-{{ user_email }}
-https://thepsasports.com
-"""
-
-FOLLOWUP_TEMPLATE = """
-Hi there,
-
-I wanted to follow up on my previous email regarding PSA's on-site sports programs for {{ school_name }}. We would love to set up a free demo session for your students to experience the fun firsthand.
-
-Please let me know if you have any questions or would like to schedule a quick call to discuss further.
-
-Best regards,  
-{{ user_name }}  
-Sales Associate and Coach  
-{{ user_email }}
-https://thepsasports.com
-"""
+# ====================================================
+# API ENDPOINTS - EMAIL OPERATIONS
+# ====================================================
 
 @app.route("/api/send-email", methods=["POST"])
 @jwt_required()
@@ -939,6 +874,7 @@ def send_email():
     print(f"DEBUG: Final result: {result}")
     
     return jsonify(result)
+
 @app.route("/api/send-followup", methods=["POST"])
 @jwt_required()
 def send_followup():
@@ -1009,9 +945,192 @@ def mark_responded():
     db.session.commit()
     return jsonify({"status": "updated"})
 
+@app.route("/api/sent-emails", methods=["GET"])
+@jwt_required()
+def get_sent_emails():
+    user_id = get_jwt_identity()
+    user = User.query.get(user_id)
+    
+    if not user:
+        return jsonify({"error": "User not found"}), 404
+    
+    # If admin, return all sent emails; otherwise, return only user's emails
+    if user.admin:
+        emails = SentEmail.query.all()
+    else:
+        emails = SentEmail.query.filter_by(user_id=user_id).all()
+    
+    return jsonify([
+        {
+            "id": email.id,
+            "school_name": email.school_name,
+            "school_email": email.school_email,
+            "sent_at": email.sent_at,
+            "responded": email.responded,
+            "followup_sent": email.followup_sent,
+            "user_name": email.user.name if hasattr(email, 'user') else None
+        }
+        for email in emails
+    ])
 
-# --- MAP API ---
-MAP_SCHOOL_CACHE = {}
+@app.route("/api/delete-sent-email", methods=["DELETE"])
+@jwt_required()
+def delete_sent_email():
+    data = request.get_json()
+    email_id = data.get("email_id")
+    
+    if not email_id:
+        return jsonify({"error": "Missing email_id"}), 400
+
+    user_id = get_jwt_identity()
+    user = User.query.get(user_id)
+    
+    if not user:
+        return jsonify({"error": "User not found"}), 404
+
+    # Find the email record - admins can delete any, users only their own
+    if user.admin:
+        email_record = SentEmail.query.get(email_id)
+    else:
+        email_record = SentEmail.query.filter_by(id=email_id, user_id=user_id).first()
+    
+    if not email_record:
+        return jsonify({"error": "Email record not found"}), 404
+
+    try:
+        db.session.delete(email_record)
+        db.session.commit()
+        return jsonify({"status": "Email record deleted successfully"})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+# ====================================================
+# API ENDPOINTS - SCHOOL FINDER
+# ====================================================
+
+@app.route("/api/find-schools", methods=["POST"])
+def find_schools():
+    data = request.get_json()
+    address = data.get("address")
+    keywords = data.get("keywords", ["elementary school", "day care", "preschool", "kindercare", "montessori"])
+    if not address:
+        return jsonify({"error": "No address provided"}), 400
+
+    # If address is a zip code or a city, append "USA" to prioritize US geocoding
+    if re.fullmatch(r"\d{5}", address.strip()):
+        address = f"{address.strip()} USA"
+    elif re.fullmatch(r"[a-zA-Z ]+", address.strip()):
+        address = f"{address.strip()} USA"
+
+    # Get normalized names of schools we already do business with
+    happy_feet_names = set([normalize_name(s["name"]) for s in happy_feet])
+    psa_names = set([normalize_name(s["name"]) for s in psa_preschools])
+    excluded_names = happy_feet_names | psa_names
+
+    # Geocode the address
+    lat, lng = geocode_address(address)
+    if lat is None or lng is None:
+        return jsonify({"error": "Address not found"}), 404
+    location = {"lat": lat, "lng": lng}
+
+    # Find nearby schools using Places API
+    places_url = "https://maps.googleapis.com/maps/api/place/nearbysearch/json"
+    base_params = {
+        "location": f"{location['lat']},{location['lng']}",
+        "radius": 5000,
+        "key": GOOGLE_API_KEY
+    }
+
+    results = []
+    for place_type in ["school"]:
+        for kw in keywords:
+            params = base_params.copy()
+            params["type"] = place_type
+            params["keyword"] = kw
+            resp = requests.get(places_url, params=params).json()
+            results.extend(resp.get("results", []))
+
+    # Remove duplicates by place_id
+    unique = {}
+    for result in results:
+        pid = result.get("place_id")
+        if pid and pid not in unique:
+            unique[pid] = result
+
+    # Filter out schools that are already in Happy Feet or PSA tables (fuzzy match)
+    schools = []
+    for result in unique.values():
+        school_name = result.get("name", "")
+        norm_name = normalize_name(school_name)
+        if any(norm_name == ex or norm_name in ex or ex in norm_name for ex in excluded_names):
+            continue
+        schools.append({
+            "name": result.get("name"),
+            "address": result.get("vicinity"),
+            "lat": result["geometry"]["location"]["lat"],
+            "lng": result["geometry"]["location"]["lng"],
+            "place_id": result.get("place_id")
+        })
+
+    return jsonify({
+        "schools": schools,
+        "location": location,
+        "google_api_key": GOOGLE_API_KEY
+    })
+
+# ====================================================
+# API ENDPOINTS - ROUTE PLANNING
+# ====================================================
+
+@app.route("/api/route-plan", methods=["POST"])
+def route_plan():
+    """Calculate shortest route visiting all selected schools."""
+    data = request.get_json()
+    schools = data.get("schools", [])
+    start_address = data.get("start_address")
+    if len(schools) < 2:
+        return jsonify({"error": "Select at least two schools"}), 400
+    if not start_address:
+        return jsonify({"error": "No starting address provided"}), 400
+
+    # Geocode the starting address
+    start_lat, start_lng = geocode_address(start_address)
+    if start_lat is None or start_lng is None:
+        return jsonify({"error": "Starting address not found"}), 404
+
+    # Build distance matrix (from start to each school, and between schools)
+    n = len(schools)
+    dist = [[0]*n for _ in range(n)]
+    for i in range(n):
+        for j in range(n):
+            if i != j:
+                dist[i][j] = haversine(
+                    schools[i]["lat"], schools[i]["lng"],
+                    schools[j]["lat"], schools[j]["lng"]
+                )
+
+    # Calculate distance from start to each school
+    start_to_school = [
+        haversine(start_lat, start_lng, s["lat"], s["lng"]) for s in schools
+    ]
+
+    # Brute-force TSP starting from start location
+    indices = list(range(n))
+    min_order = None
+    min_dist = float('inf')
+    for perm in permutations(indices):
+        d = start_to_school[perm[0]]  # from start to first school
+        d += sum(dist[perm[i]][perm[i+1]] for i in range(n-1))
+        if d < min_dist:
+            min_dist = d
+            min_order = perm
+
+    route = [schools[i]["place_id"] for i in min_order]
+    return jsonify({"route": route})
+
+# ====================================================
+# API ENDPOINTS - MAP VISUALIZATION
+# ====================================================
 
 @app.route("/api/map-schools", methods=["GET"])
 def map_schools():
@@ -1065,90 +1184,9 @@ def refresh_map_schools():
     }
     return jsonify({"status": "refreshed"})
 
-@app.route("/api/sent-emails", methods=["GET"])
-@jwt_required()
-def get_sent_emails():
-    user_id = get_jwt_identity()
-    user = User.query.get(user_id)
-    
-    if not user:
-        return jsonify({"error": "User not found"}), 404
-    
-    # If admin, return all sent emails; otherwise, return only user's emails
-    if user.admin:
-        emails = SentEmail.query.all()
-    else:
-        emails = SentEmail.query.filter_by(user_id=user_id).all()
-    
-    return jsonify([
-        {
-            "id": email.id,
-            "school_name": email.school_name,
-            "school_email": email.school_email,
-            "sent_at": email.sent_at,
-            "responded": email.responded,
-            "followup_sent": email.followup_sent,
-            "user_name": email.user.name if hasattr(email, 'user') else None  # Show which user sent it
-        }
-        for email in emails
-    ])
-
-# --- Delete Sent Email ---
-@app.route("/api/delete-sent-email", methods=["DELETE"])
-@jwt_required()
-def delete_sent_email():
-    data = request.get_json()
-    email_id = data.get("email_id")
-    
-    if not email_id:
-        return jsonify({"error": "Missing email_id"}), 400
-
-    user_id = get_jwt_identity()
-    user = User.query.get(user_id)
-    
-    if not user:
-        return jsonify({"error": "User not found"}), 404
-
-    # Find the email record - admins can delete any, users only their own
-    if user.admin:
-        email_record = SentEmail.query.get(email_id)
-    else:
-        email_record = SentEmail.query.filter_by(id=email_id, user_id=user_id).first()
-    
-    if not email_record:
-        return jsonify({"error": "Email record not found"}), 404
-
-    try:
-        db.session.delete(email_record)
-        db.session.commit()
-        return jsonify({"status": "Email record deleted successfully"})
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
-
-@app.route("/api/check-email-replies", methods=["POST"])
-@jwt_required()
-def manual_check_email_replies():
-    """Manually trigger email reply checking"""
-    user_id = get_jwt_identity()
-    user = User.query.get(user_id)
-    
-    if not user:
-        return jsonify({"error": "User not found"}), 404
-    
-    if not user.email_password:
-        return jsonify({"error": "Email settings not configured"}), 400
-    
-    try:
-        if user.admin:
-            # Admin can check all emails
-            check_email_replies()
-            return jsonify({"status": "Checked all user emails for replies"})
-        else:
-            # Regular user can only check their own
-            check_user_email_replies(user)
-            return jsonify({"status": "Checked your emails for replies"})
-    except Exception as e:
-        return jsonify({"error": f"Failed to check emails: {str(e)}"}), 500
+# ====================================================
+# APPLICATION STARTUP
+# ====================================================
 
 if __name__ == "__main__":
     with app.app_context():
