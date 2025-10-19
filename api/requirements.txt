@@ -10,3 +10,9 @@ gspread
 oauth2client
 google-auth
 imapclient
+python-dotenv
+psycopg2-binary
+gunicorn
+google-api-python-client
+google-auth-httplib2
+google-auth-oauthlib
