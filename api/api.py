@@ -816,6 +816,38 @@ def get_sent_emails():
         for email in emails
     ])
 
+# --- Delete Sent Email ---
+@app.route("/api/delete-sent-email", methods=["DELETE"])
+@jwt_required()
+def delete_sent_email():
+    data = request.get_json()
+    email_id = data.get("email_id")
+    
+    if not email_id:
+        return jsonify({"error": "Missing email_id"}), 400
+
+    user_id = get_jwt_identity()
+    user = User.query.get(user_id)
+    
+    if not user:
+        return jsonify({"error": "User not found"}), 404
+
+    # Find the email record - admins can delete any, users only their own
+    if user.admin:
+        email_record = SentEmail.query.get(email_id)
+    else:
+        email_record = SentEmail.query.filter_by(id=email_id, user_id=user_id).first()
+    
+    if not email_record:
+        return jsonify({"error": "Email record not found"}), 404
+
+    try:
+        db.session.delete(email_record)
+        db.session.commit()
+        return jsonify({"status": "Email record deleted successfully"})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
 if __name__ == "__main__":
     with app.app_context():
         db.create_all()
