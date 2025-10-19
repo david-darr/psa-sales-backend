@@ -143,6 +143,7 @@ class User(db.Model):
     email = db.Column(db.String, unique=True, nullable=False)
     phone = db.Column(db.String, nullable=True)
     password_hash = db.Column(db.String, nullable=False)
+    admin = db.Column(db.Boolean, nullable=False, default=False)
     
     # Email settings for sending emails
     email_password = db.Column(db.String, nullable=True)  # App password for Gmail
@@ -243,7 +244,13 @@ def login():
         access_token = create_access_token(identity=str(user.id))
         return jsonify({
             "access_token": access_token,
-            "user": {"id": user.id, "name": user.name, "email": user.email, "phone": user.phone}
+            "user": {
+                "id": user.id, 
+                "name": user.name, 
+                "email": user.email, 
+                "phone": user.phone,
+                "admin": user.admin
+            }
         })
     return jsonify({"error": "Invalid credentials"}), 401
 
@@ -254,7 +261,13 @@ def profile():
     user = User.query.get(user_id)
     if not user:
         return jsonify({"error": "User not found"}), 404
-    return jsonify({"id": user.id, "name": user.name, "email": user.email, "phone": user.phone})
+    return jsonify({
+        "id": user.id, 
+        "name": user.name, 
+        "email": user.email, 
+        "phone": user.phone,
+        "admin": user.admin
+    })
 
 @app.route("/api/email-settings", methods=["POST"])
 @jwt_required()
@@ -318,7 +331,16 @@ def add_school():
 @jwt_required()
 def get_my_schools():
     user_id = get_jwt_identity()
-    schools = SalesSchool.query.filter_by(user_id=user_id).all()
+    user = User.query.get(user_id)
+    
+    if not user:
+        return jsonify({"error": "User not found"}), 404
+    
+    # If admin, return all schools; otherwise, return only user's schools
+    if user.admin:
+        schools = SalesSchool.query.all()
+    else:
+        schools = SalesSchool.query.filter_by(user_id=user_id).all()
     
     return jsonify([
         {
@@ -330,7 +352,8 @@ def get_my_schools():
             "address": school.address,
             "status": school.status,
             "notes": school.notes,
-            "created_at": school.created_at
+            "created_at": school.created_at,
+            "user_name": school.user.name if hasattr(school, 'user') else None  # Show which user added it
         }
         for school in schools
     ])
@@ -719,7 +742,17 @@ def refresh_map_schools():
 @jwt_required()
 def get_sent_emails():
     user_id = get_jwt_identity()
-    emails = SentEmail.query.filter_by(user_id=user_id).all()
+    user = User.query.get(user_id)
+    
+    if not user:
+        return jsonify({"error": "User not found"}), 404
+    
+    # If admin, return all sent emails; otherwise, return only user's emails
+    if user.admin:
+        emails = SentEmail.query.all()
+    else:
+        emails = SentEmail.query.filter_by(user_id=user_id).all()
+    
     return jsonify([
         {
             "id": email.id,
@@ -727,7 +760,8 @@ def get_sent_emails():
             "school_email": email.school_email,
             "sent_at": email.sent_at,
             "responded": email.responded,
-            "followup_sent": email.followup_sent
+            "followup_sent": email.followup_sent,
+            "user_name": email.user.name if hasattr(email, 'user') else None  # Show which user sent it
         }
         for email in emails
     ])
