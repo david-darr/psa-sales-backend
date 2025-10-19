@@ -11,6 +11,7 @@ import imaplib
 import email
 from email.header import decode_header
 import ssl
+import pytz
 from datetime import datetime, timedelta
 
 from flask import Flask, request, jsonify, render_template_string
@@ -30,7 +31,29 @@ from flask_jwt_extended import (
 )
 
 from apscheduler.schedulers.background import BackgroundScheduler
+from apscheduler.executors.pool import ThreadPoolExecutor
 import atexit
+import logging
+
+# Configure logging for scheduler
+logging.basicConfig(level=logging.INFO)
+scheduler_logger = logging.getLogger('apscheduler')
+
+# Initialize scheduler with better configuration
+executors = {
+    'default': ThreadPoolExecutor(20)
+}
+job_defaults = {
+    'coalesce': False,
+    'max_instances': 1,
+    'misfire_grace_time': 300  # 5 minutes grace period
+}
+
+scheduler = BackgroundScheduler(
+    executors=executors,
+    job_defaults=job_defaults,
+    timezone='UTC'
+)
 
 
 
@@ -215,22 +238,46 @@ def geocode_address(address):
 
 def check_email_replies():
     """Check for email replies and update the database"""
-    print("Starting email reply check...")
-    
-    # Get all users who have sent emails and have email passwords configured
-    users_with_emails = User.query.filter(
-        User.email_password.isnot(None),
-        User.id.in_(db.session.query(SentEmail.user_id).distinct())
-    ).all()
-    
-    for user in users_with_emails:
+    with app.app_context():  # This is the key fix!
+        start_time = datetime.utcnow()
+        print(f"=== AUTOMATIC EMAIL REPLY CHECK STARTED at {start_time} ===")
+        
         try:
-            print(f"Checking emails for user: {user.email}")
-            check_user_email_replies(user)
+            # Get all users who have sent emails and have email passwords configured
+            users_with_emails = User.query.filter(
+                User.email_password.isnot(None),
+                User.id.in_(db.session.query(SentEmail.user_id).distinct())
+            ).all()
+            
+            print(f"Found {len(users_with_emails)} users with email configurations")
+            
+            total_replies_found = 0
+            
+            for user in users_with_emails:
+                try:
+                    print(f"Checking emails for user: {user.email}")
+                    replies_before = SentEmail.query.filter_by(user_id=user.id, responded=True).count()
+                    check_user_email_replies(user)
+                    replies_after = SentEmail.query.filter_by(user_id=user.id, responded=True).count()
+                    new_replies = replies_after - replies_before
+                    total_replies_found += new_replies
+                    print(f"Found {new_replies} new replies for {user.email}")
+                except Exception as e:
+                    print(f"Error checking emails for {user.email}: {str(e)}")
+                    import traceback
+                    traceback.print_exc()
+            
+            end_time = datetime.utcnow()
+            duration = (end_time - start_time).total_seconds()
+            print(f"=== AUTOMATIC EMAIL REPLY CHECK COMPLETED at {end_time} ===")
+            print(f"Duration: {duration:.2f} seconds")
+            print(f"Total new replies found: {total_replies_found}")
+            print(f"Next check scheduled for: {(start_time + timedelta(minutes=30)).strftime('%Y-%m-%d %H:%M:%S')} UTC")
+            
         except Exception as e:
-            print(f"Error checking emails for {user.email}: {str(e)}")
-    
-    print("Email reply check completed")
+            print(f"ERROR in automatic email check: {str(e)}")
+            import traceback
+            traceback.print_exc()
 
 def check_user_email_replies(user):
     """Check email replies for a specific user - focused on 'Re:' subjects only"""
@@ -393,26 +440,52 @@ def extract_email_from_string(email_string):
     return result
 
 # Initialize scheduler
-scheduler = BackgroundScheduler()
+scheduler = BackgroundScheduler(
+    executors=executors,
+    job_defaults=job_defaults,
+    timezone='UTC'
+)
 
 def start_scheduler():
     """Start the background scheduler for checking email replies"""
-    if not scheduler.running:
-        # Check for email replies every 30 minutes
-        scheduler.add_job(
-            func=check_email_replies,
-            trigger="interval",
-            minutes=30,  # Check every 30 minutes
-            id='email_reply_checker'
-        )
-        scheduler.start()
-        print("Email reply checker scheduled to run every 30 minutes")
-        
-        # Shut down the scheduler when exiting the app
-        atexit.register(lambda: scheduler.shutdown())
+    try:
+        if not scheduler.running:
+            # Check for email replies every 30 minutes
+            scheduler.add_job(
+                func=check_email_replies,
+                trigger="interval",
+                minutes=30,
+                id='email_reply_checker',
+                replace_existing=True,
+                misfire_grace_time=600  # 10 minutes grace period
+            )
+            
+            # Add a heartbeat job to verify scheduler is working
+            scheduler.add_job(
+                func=lambda: print(f"Scheduler heartbeat: {datetime.utcnow()}"),
+                trigger="interval",
+                minutes=10,
+                id='scheduler_heartbeat',
+                replace_existing=True
+            )
+            
+            scheduler.start()
+            print(f"✅ Email reply checker scheduled to run every 30 minutes")
+            print(f"✅ Scheduler heartbeat every 10 minutes")
+            
+            # Shut down the scheduler when exiting the app
+            atexit.register(lambda: scheduler.shutdown(wait=False))
+            
+        return True
+    except Exception as e:
+        print(f"❌ Failed to start scheduler: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        return False
 
 # Start the scheduler when the app starts
-start_scheduler()
+scheduler_started = start_scheduler()
+print(f"Scheduler initialization: {'✅ Success' if scheduler_started else '❌ Failed'}")
 
 # ====== API ENDPOINTS ======
 
