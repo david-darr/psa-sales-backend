@@ -118,6 +118,7 @@ class SalesSchool(db.Model):
     email = db.Column(db.String, nullable=False)
     phone = db.Column(db.String, nullable=True)
     address = db.Column(db.String, nullable=True)
+    school_type = db.Column(db.String, nullable=False, default='preschool')  # NEW FIELD
     status = db.Column(db.String, default='pending')
     notes = db.Column(db.Text, nullable=True)
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
@@ -671,9 +672,14 @@ def add_school():
     contact_name = data.get("contact_name")
     phone = data.get("phone")
     address = data.get("address")
+    school_type = data.get("school_type", "preschool")  # NEW FIELD
     
     if not all([school_name, email]):
         return jsonify({"error": "School name and email required"}), 400
+    
+    # Validate school type
+    if school_type not in ['preschool', 'elementary']:
+        return jsonify({"error": "School type must be 'preschool' or 'elementary'"}), 400
     
     user_id = get_jwt_identity()
     
@@ -692,6 +698,7 @@ def add_school():
         email=email,
         phone=phone,
         address=address,
+        school_type=school_type,  # NEW FIELD
         user_id=user_id
     )
     
@@ -723,6 +730,7 @@ def get_my_schools():
             "email": school.email,
             "phone": school.phone,
             "address": school.address,
+            "school_type": school.school_type,  # NEW FIELD
             "status": school.status,
             "notes": school.notes,
             "created_at": school.created_at,
