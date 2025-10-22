@@ -16,6 +16,8 @@ import logging
 from itertools import permutations
 from math import radians, cos, sin, sqrt, atan2
 from datetime import datetime, timedelta
+import traceback
+import gspread
 
 # Flask & Extensions
 from flask import Flask, request, jsonify, render_template_string
@@ -27,7 +29,6 @@ from flask_jwt_extended import (
 )
 
 # Third-party Services
-import gspread
 from oauth2client.service_account import ServiceAccountCredentials
 from google.oauth2 import id_token
 from google.auth.transport import requests as google_requests
@@ -1204,39 +1205,22 @@ def get_team_stats():
         current_user = get_jwt_identity()
         
         # Get all users
-        users_query = """
-        SELECT id, name, email, phone, admin 
-        FROM users 
-        ORDER BY name
-        """
-        users = db.session.execute(users_query).fetchall()
+        users = User.query.all()  # Use SQLAlchemy ORM instead of raw SQL
         
         team_stats = []
         
         for user in users:
-            user_id = user[0]
-            user_name = user[1]
-            user_email = user[2]
-            user_phone = user[3]
-            is_admin = user[4]
-            
-            # Count schools for this user
-            schools_query = """
-            SELECT COUNT(*) FROM sales_schools WHERE user_id = :user_id
-            """
-            school_count = db.session.execute(schools_query, {"user_id": user_id}).scalar()
+            # Count schools for this user - use correct table name 'sales_schools'
+            school_count = SalesSchool.query.filter_by(user_id=user.id).count()
             
             # Count emails for this user
-            emails_query = """
-            SELECT COUNT(*) FROM sent_emails WHERE user_id = :user_id
-            """
-            email_count = db.session.execute(emails_query, {"user_id": user_id}).scalar()
+            email_count = SentEmail.query.filter_by(user_id=user.id).count()
             
             team_stats.append({
-                'name': user_name,
-                'email': user_email,
-                'phone': user_phone or 'Not provided',
-                'role': 'Administrator' if is_admin else 'Sales Associate',
+                'name': user.name,
+                'email': user.email,
+                'phone': user.phone or 'Not provided',
+                'role': 'Administrator' if user.admin else 'Sales Associate',
                 'totalSchools': school_count,
                 'totalEmails': email_count
             })
@@ -1244,6 +1228,8 @@ def get_team_stats():
         return jsonify(team_stats)
         
     except Exception as e:
+        print(f"Error in team-stats: {str(e)}")
+        traceback.print_exc()
         return jsonify({'error': str(e)}), 500
 
 @app.route('/api/all-schools', methods=['GET'])
@@ -1251,34 +1237,31 @@ def get_team_stats():
 def get_all_schools():
     """Get all schools with user information (for fallback team stats)"""
     try:
-        query = """
-        SELECT s.*, u.name as user_name, u.email as user_email, u.phone as user_phone
-        FROM schools s
-        LEFT JOIN users u ON s.user_id = u.id
-        ORDER BY s.school_name
-        """
-        schools = db.session.execute(query).fetchall()
+        # Use SQLAlchemy ORM with joins
+        schools = db.session.query(SalesSchool, User).outerjoin(User, SalesSchool.user_id == User.id).all()
         
         school_list = []
-        for school in schools:
+        for school, user in schools:
             school_list.append({
-                'id': school[0],
-                'school_name': school[1],
-                'contact_name': school[2],
-                'email': school[3],
-                'phone': school[4],
-                'address': school[5],
-                'school_type': school[6],
-                'status': school[7],
-                'user_id': school[8],
-                'user_name': school[9],
-                'user_email': school[10],
-                'user_phone': school[11]
+                'id': school.id,
+                'school_name': school.school_name,
+                'contact_name': school.contact_name,
+                'email': school.email,
+                'phone': school.phone,
+                'address': school.address,
+                'school_type': school.school_type,
+                'status': school.status,
+                'user_id': school.user_id,
+                'user_name': user.name if user else None,
+                'user_email': user.email if user else None,
+                'user_phone': user.phone if user else None
             })
         
         return jsonify(school_list)
         
     except Exception as e:
+        print(f"Error in all-schools: {str(e)}")
+        traceback.print_exc()
         return jsonify({'error': str(e)}), 500
 
 @app.route('/api/all-emails', methods=['GET'])
@@ -1286,34 +1269,29 @@ def get_all_schools():
 def get_all_emails():
     """Get all sent emails with user information (for fallback team stats)"""
     try:
-        query = """
-        SELECT se.*, s.school_name, u.name as user_name, u.email as user_email, u.phone as user_phone
-        FROM sent_emails se
-        LEFT JOIN schools s ON se.school_id = s.id
-        LEFT JOIN users u ON se.user_id = u.id
-        ORDER BY se.sent_at DESC
-        """
-        emails = db.session.execute(query).fetchall()
+        # Use SQLAlchemy ORM with joins
+        emails = db.session.query(SentEmail, User).outerjoin(User, SentEmail.user_id == User.id).all()
         
         email_list = []
-        for email in emails:
+        for email, user in emails:
             email_list.append({
-                'id': email[0],
-                'school_id': email[1],
-                'user_id': email[2],
-                'subject': email[3],
-                'sent_at': email[4],
-                'responded': bool(email[5]),
-                'followup_sent': bool(email[6]),
-                'school_name': email[7],
-                'user_name': email[8],
-                'user_email': email[9],
-                'user_phone': email[10]
+                'id': email.id,
+                'school_name': email.school_name,
+                'school_email': email.school_email,
+                'sent_at': email.sent_at.isoformat() if email.sent_at else None,
+                'responded': email.responded,
+                'followup_sent': email.followup_sent,
+                'user_id': email.user_id,
+                'user_name': user.name if user else None,
+                'user_email': user.email if user else None,
+                'user_phone': user.phone if user else None
             })
         
         return jsonify(email_list)
         
     except Exception as e:
+        print(f"Error in all-emails: {str(e)}")
+        traceback.print_exc()
         return jsonify({'error': str(e)}), 500
 
 # ====================================================
