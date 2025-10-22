@@ -1193,6 +1193,130 @@ def refresh_map_schools():
     return jsonify({"status": "refreshed"})
 
 # ====================================================
+# API ENDPOINTS - TEAM STATS
+# ====================================================
+
+@app.route('/api/team-stats', methods=['GET'])
+@jwt_required()
+def get_team_stats():
+    """Get all team members with their statistics"""
+    try:
+        current_user = get_jwt_identity()
+        
+        # Get all users
+        users_query = """
+        SELECT id, name, email, phone, admin 
+        FROM users 
+        ORDER BY name
+        """
+        users = db.session.execute(users_query).fetchall()
+        
+        team_stats = []
+        
+        for user in users:
+            user_id = user[0]
+            user_name = user[1]
+            user_email = user[2]
+            user_phone = user[3]
+            is_admin = user[4]
+            
+            # Count schools for this user
+            schools_query = """
+            SELECT COUNT(*) FROM sales_schools WHERE user_id = :user_id
+            """
+            school_count = db.session.execute(schools_query, {"user_id": user_id}).scalar()
+            
+            # Count emails for this user
+            emails_query = """
+            SELECT COUNT(*) FROM sent_emails WHERE user_id = :user_id
+            """
+            email_count = db.session.execute(emails_query, {"user_id": user_id}).scalar()
+            
+            team_stats.append({
+                'name': user_name,
+                'email': user_email,
+                'phone': user_phone or 'Not provided',
+                'role': 'Administrator' if is_admin else 'Sales Associate',
+                'totalSchools': school_count,
+                'totalEmails': email_count
+            })
+        
+        return jsonify(team_stats)
+        
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/all-schools', methods=['GET'])
+@jwt_required()
+def get_all_schools():
+    """Get all schools with user information (for fallback team stats)"""
+    try:
+        query = """
+        SELECT s.*, u.name as user_name, u.email as user_email, u.phone as user_phone
+        FROM schools s
+        LEFT JOIN users u ON s.user_id = u.id
+        ORDER BY s.school_name
+        """
+        schools = db.session.execute(query).fetchall()
+        
+        school_list = []
+        for school in schools:
+            school_list.append({
+                'id': school[0],
+                'school_name': school[1],
+                'contact_name': school[2],
+                'email': school[3],
+                'phone': school[4],
+                'address': school[5],
+                'school_type': school[6],
+                'status': school[7],
+                'user_id': school[8],
+                'user_name': school[9],
+                'user_email': school[10],
+                'user_phone': school[11]
+            })
+        
+        return jsonify(school_list)
+        
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/all-emails', methods=['GET'])
+@jwt_required()
+def get_all_emails():
+    """Get all sent emails with user information (for fallback team stats)"""
+    try:
+        query = """
+        SELECT se.*, s.school_name, u.name as user_name, u.email as user_email, u.phone as user_phone
+        FROM sent_emails se
+        LEFT JOIN schools s ON se.school_id = s.id
+        LEFT JOIN users u ON se.user_id = u.id
+        ORDER BY se.sent_at DESC
+        """
+        emails = db.session.execute(query).fetchall()
+        
+        email_list = []
+        for email in emails:
+            email_list.append({
+                'id': email[0],
+                'school_id': email[1],
+                'user_id': email[2],
+                'subject': email[3],
+                'sent_at': email[4],
+                'responded': bool(email[5]),
+                'followup_sent': bool(email[6]),
+                'school_name': email[7],
+                'user_name': email[8],
+                'user_email': email[9],
+                'user_phone': email[10]
+            })
+        
+        return jsonify(email_list)
+        
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+# ====================================================
 # APPLICATION STARTUP
 # ====================================================
 
