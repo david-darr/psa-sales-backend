@@ -19,6 +19,12 @@ from datetime import datetime, timedelta
 import traceback
 import gspread
 
+from email.mime.multipart import MIMEMultipart
+from email.mime.text import MIMEText
+from email.mime.base import MIMEBase
+from email import encoders
+import smtplib
+
 # Flask & Extensions
 from flask import Flask, request, jsonify, render_template_string
 from flask_mail import Mail, Message
@@ -507,25 +513,30 @@ print(f"Scheduler initialization: {'✅ Success' if scheduler_started else '❌ 
 # EMAIL TEMPLATES
 # ====================================================
 
-EMAIL_TEMPLATE = """
-Hi {{ contact_name }},
+# Template for Preschools
+PRESCHOOL_EMAIL_TEMPLATE = """
+Hello {{ contact_name }},
 
 My name is {{ user_name }}, and I'm with The Players Sports Academy (PSA) — a nonprofit organization offering fun, convenient sports activities for preschool students ages 2-5 right on campus during the school day. 
 
-It was a pleasure learning about {{ school_name }}! I'd love to share information about our on-site sports programs.
+It was a pleasure visiting {{ school_name }} recently! I'd love to share more information about our on-site sports programs specifically designed for your preschoolers.
 
-PSA TOTS currently works with over 60 preschools in the Northern Virginia area, providing quality sports programs designed specifically for young learners.
+PSA TOTS currently works with over 60 preschools in the Northern Virginia area, providing quality sports programs designed specifically for young learners ages 2-5.
 
-Here's why schools and families love working with PSA:
+Here's why preschools and families love working with PSA:
 • On-site convenience - Programs run during school hours with no extra work for your team
+• Age-appropriate activities - All programs designed specifically for 2-5 year olds
 • All equipment provided - I bring everything needed for each session
 • Flexible scheduling - Programs available seasonally or year-round
-• Variety of activities - Soccer, Basketball, T-Ball, and Yoga designed for young learners
+• Variety of activities - Soccer, Basketball, T-Ball, and Yoga designed for preschoolers
 • Fundraising opportunity - Schools can raise funds through the programs
+• Professional coaching - All coaches are trained in early childhood development
 
 We would love to set up a free demo session so your students can experience the fun firsthand!
 
 Would you be open to a quick call or meeting to discuss the details? Please let me know a date and time that works best for you.
+
+I've attached our preschool program overview for your review.
 
 Thank you for your time, and I look forward to the opportunity to work together!
 
@@ -536,12 +547,66 @@ Sales Associate and Coach
 https://thepsasports.com
 """
 
-FOLLOWUP_TEMPLATE = """
-Hi there,
+# Template for Elementary Schools
+ELEMENTARY_EMAIL_TEMPLATE = """
+Hello {{ contact_name }},
 
-I wanted to follow up on my previous email regarding PSA's on-site sports programs for {{ school_name }}. We would love to set up a free demo session for your students to experience the fun firsthand.
+My name is {{ user_name }}, and I'm with The Players Sports Academy (PSA) — a nationally recognized nonprofit specializing in after-school athletic enrichment for elementary students.
+
+It was a pleasure visiting {{ school_name }} recently! I'd love to share more information about our comprehensive sports programs designed for elementary-aged children.
+
+PSA currently partners with numerous elementary schools in the area, providing quality sports programs that complement your educational mission.
+
+Here's why elementary schools and families choose PSA:
+• No cost to the school - Parents enroll directly, and we offer a revenue-share model to support your PTA or school initiatives.
+• Hassle-free - We handle everything: professional coaches, equipment, registration, and student pick-up after each session.
+• Flexible offerings - Programs run seasonally (6-8 weeks) with options like soccer, basketball, flag football, and more.
+• Community-focused - We provide scholarships and fundraising support to help all students participate.
+
+We offer both recreational and competitive program options to meet the diverse needs of your student body.
+
+Would you be interested in scheduling a brief meeting to discuss how PSA can enhance your school's athletic offerings? I'm happy to work around your schedule.
+
+I've attached detailed information about our elementary programs and partnership options.
+
+Thank you for your time and consideration!
+
+Best regards,
+{{ user_name }}
+Sales Associate and Coach
+{{ user_email }}
+https://thepsasports.com
+"""
+
+# Follow up
+PRESCHOOL_FOLLOWUP_TEMPLATE = """
+Hello there,
+
+I wanted to follow up on my previous email regarding PSA's on-site preschool sports programs for {{ school_name }}. 
+
+Our PSA TOTS program has been incredibly successful at preschools throughout Northern Virginia, helping children ages 2-5 develop fundamental motor skills while having fun.
+
+We would love to set up a free demo session for your preschoolers to experience our age-appropriate activities firsthand.
 
 Please let me know if you have any questions or would like to schedule a quick call to discuss further.
+
+Best regards,  
+{{ user_name }}  
+Sales Associate and Coach  
+{{ user_email }}
+https://thepsasports.com
+"""
+
+ELEMENTARY_FOLLOWUP_TEMPLATE = """
+Hello there,
+
+I wanted to follow up on my previous email regarding PSA's sports programs for {{ school_name }}.
+
+Our elementary programs have been a great success at schools throughout the region, providing students with quality athletic instruction and character development opportunities.
+
+I'd be happy to discuss how we can customize a program to fit your school's specific needs and schedule.
+
+Please let me know if you have any questions or would like to schedule a brief conversation.
 
 Best regards,  
 {{ user_name }}  
@@ -772,10 +837,6 @@ def send_email():
     if not user:
         return jsonify({"error": "User not found"}), 400
     
-    print(f"DEBUG: User email: {user.email}")
-    print(f"DEBUG: User has email_password: {bool(user.email_password)}")
-    print(f"DEBUG: Email password length: {len(user.email_password) if user.email_password else 0}")
-    
     if not user.email_password:
         return jsonify({"error": "Email settings not configured"}), 400
 
@@ -788,10 +849,6 @@ def send_email():
             SalesSchool.user_id == user_id
         ).all()
     
-    print(f"DEBUG: Found {len(schools)} schools to email")
-    for school in schools:
-        print(f"DEBUG: School - {school.school_name}, Email: {school.email}")
-    
     if not schools:
         return jsonify({"error": "No valid schools found"}), 400
 
@@ -800,73 +857,68 @@ def send_email():
 
     for school in schools:
         try:
-            print(f"DEBUG: Processing school: {school.school_name}")
+            print(f"DEBUG: Processing school: {school.school_name} (Type: {school.school_type})")
+            
+            # Choose template, subject, and PDFs based on school type
+            if school.school_type == 'preschool':
+                email_template = PRESCHOOL_EMAIL_TEMPLATE
+                email_subject = f"Fun Sports Programs for {school.school_name} Preschoolers!"
+                pdf_files = [
+                    "PSA TOTS year round flyer.pdf",
+                    "PSA TOTS seasonal flyer.pdf",
+                    "PSA TOTS Recommendation (Primrose School).pdf"
+                ]
+            else:  # elementary
+                email_template = ELEMENTARY_EMAIL_TEMPLATE
+                email_subject = f"Sports Programs for {school.school_name} Students"
+                pdf_files = [
+                    "PSA After School.pdf",
+                    "PSA Recommendation Letter (Madison Trust ES).pdf"
+                ]
             
             # Create email body
             body = render_template_string(
-                EMAIL_TEMPLATE,
+                email_template,
                 user_name=user.name,
                 user_email=user.email,
                 school_name=school.school_name,
                 contact_name=school.contact_name or "Director/Administrator"
             )
-            print(f"DEBUG: Email body created for {school.school_name}")
-
-            # Configure Flask-Mail for this user
-            print(f"DEBUG: Configuring mail with:")
-            print(f"  - MAIL_USERNAME: {user.email}")
-            print(f"  - MAIL_PASSWORD: {'*' * len(user.email_password)}")
-            print(f"  - MAIL_SERVER: smtp.gmail.com")
-            print(f"  - MAIL_PORT: 587")
             
-            # Reconfigure mail settings for this user
-            app.config['MAIL_USERNAME'] = user.email
-            app.config['MAIL_PASSWORD'] = user.email_password
-            app.config['MAIL_DEFAULT_SENDER'] = user.email
-            app.config['MAIL_SERVER'] = 'smtp.gmail.com'
-            app.config['MAIL_PORT'] = 587
-            app.config['MAIL_USE_TLS'] = True
-            app.config['MAIL_USE_SSL'] = False
-            
-            # Reinitialize mail with new config
-            mail.init_app(app)
-            
-            print(f"DEBUG: Creating message...")
-            msg = Message(
-                subject=subject,
-                recipients=[school.email],
+            # Send email with attachments using SMTP directly
+            success = send_email_with_attachments(
+                from_email=user.email,
+                from_password=user.email_password,
+                to_email=school.email,
+                subject=email_subject,
                 body=body,
-                sender=user.email
+                pdf_files=pdf_files,
+                from_name=user.name
             )
-            print(f"DEBUG: Message created, attempting to send to {school.email}...")
             
-            # Try to send the email
-            mail.send(msg)
-            print(f"DEBUG: Email sent successfully to {school.email}")
-            
-            # Log the email
-            new_email = SentEmail(
-                school_name=school.school_name,
-                school_email=school.email,
-                user_id=user_id,
-                responded=False,
-                followup_sent=False
-            )
-            db.session.add(new_email)
-            
-            # Update school status
-            school.status = 'contacted'
-            
-            sent_count += 1
+            if success:
+                print(f"DEBUG: Email sent successfully to {school.email}")
+                
+                # Log the email
+                new_email = SentEmail(
+                    school_name=school.school_name,
+                    school_email=school.email,
+                    user_id=user_id,
+                    responded=False,
+                    followup_sent=False
+                )
+                db.session.add(new_email)
+                
+                # Update school status
+                school.status = 'contacted'
+                sent_count += 1
+            else:
+                errors.append(f"Failed to send to {school.school_name}")
             
         except Exception as e:
-            error_msg = f"Failed to send to {school.school_name}: {type(e).__name__}: {str(e)}"
+            error_msg = f"Failed to send to {school.school_name}: {str(e)}"
             print(f"DEBUG ERROR: {error_msg}")
             errors.append(error_msg)
-            
-            # Print full traceback for debugging
-            import traceback
-            print(f"DEBUG TRACEBACK:")
             traceback.print_exc()
     
     try:
@@ -880,10 +932,73 @@ def send_email():
         "sent_count": sent_count,
         "errors": errors
     }
-    print(f"DEBUG: Final result: {result}")
     
     return jsonify(result)
 
+def send_email_with_attachments(from_email, from_password, to_email, subject, body, pdf_files, from_name):
+    """Send email with PDF attachments using SMTP"""
+    try:
+        # Create message
+        msg = MIMEMultipart()
+        msg['From'] = f"{from_name} <{from_email}>"
+        msg['To'] = to_email
+        msg['Subject'] = subject
+        
+        # Add body to email
+        msg.attach(MIMEText(body, 'plain'))
+        
+        # Define the path where PDFs are stored
+        pdf_directory = os.path.join(os.path.dirname(__file__), 'pdf_attachments')
+        
+        # Attach PDF files
+        for pdf_file in pdf_files:
+            pdf_path = os.path.join(pdf_directory, pdf_file)
+            
+            if os.path.exists(pdf_path):
+                print(f"DEBUG: Attaching PDF: {pdf_file}")
+                with open(pdf_path, "rb") as attachment:
+                    part = MIMEBase('application', 'octet-stream')
+                    part.set_payload(attachment.read())
+                
+                # Encode file in ASCII characters to send by email    
+                encoders.encode_base64(part)
+                
+                # Add header as key/value pair to attachment part
+                part.add_header(
+                    'Content-Disposition',
+                    f'attachment; filename= {pdf_file}',
+                )
+                
+                # Attach the part to message
+                msg.attach(part)
+            else:
+                print(f"WARNING: PDF file not found: {pdf_path}")
+                print(f"DEBUG: Looking for file at: {pdf_path}")
+                # List files in the directory for debugging
+                if os.path.exists(pdf_directory):
+                    files_in_dir = os.listdir(pdf_directory)
+                    print(f"DEBUG: Files in pdf_attachments directory: {files_in_dir}")
+                else:
+                    print(f"DEBUG: pdf_attachments directory does not exist at: {pdf_directory}")
+        
+        # Create SMTP session
+        server = smtplib.SMTP('smtp.gmail.com', 587)
+        server.starttls()  # Enable security
+        server.login(from_email, from_password)
+        
+        # Send email
+        text = msg.as_string()
+        server.sendmail(from_email, to_email, text)
+        server.quit()
+        
+        return True
+        
+    except Exception as e:
+        print(f"Error sending email with attachments: {str(e)}")
+        traceback.print_exc()
+        return False
+
+# Also update the followup email function
 @app.route("/api/send-followup", methods=["POST"])
 @jwt_required()
 def send_followup():
@@ -906,9 +1021,22 @@ def send_followup():
     if original_email.followup_sent:
         return jsonify({"error": "Follow-up already sent"}), 400
 
+    # Get the school to determine type
+    school = SalesSchool.query.filter_by(
+        school_name=original_email.school_name,
+        email=original_email.school_email,
+        user_id=user_id
+    ).first()
+    
+    # Choose followup template based on school type
+    if school and school.school_type == 'preschool':
+        followup_template = PRESCHOOL_FOLLOWUP_TEMPLATE
+    else:
+        followup_template = ELEMENTARY_FOLLOWUP_TEMPLATE
+
     # Send follow-up email
     followup_body = render_template_string(
-        FOLLOWUP_TEMPLATE,
+        followup_template,
         school_name=original_email.school_name,
         user_name=user.name,
         user_email=user.email
