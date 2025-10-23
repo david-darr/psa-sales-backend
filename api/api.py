@@ -517,7 +517,7 @@ print(f"Scheduler initialization: {'✅ Success' if scheduler_started else '❌ 
 PRESCHOOL_EMAIL_TEMPLATE = """
 Hello {{ contact_name }},
 
-My name is {{ user_name }}, and I'm with The Players Sports Academy (PSA) — a nonprofit organization offering fun, convenient sports activities for preschool students ages 2-5 right on campus during the school day. 
+My name is {{ user_name }}, and I'm with The Players Sports Academy (PSA) - a nonprofit organization offering fun, convenient sports activities for preschool students ages 2-5 right on campus during the school day. 
 
 It was a pleasure visiting {{ school_name }} recently! I'd love to share more information about our on-site sports programs specifically designed for your preschoolers.
 
@@ -551,7 +551,7 @@ https://thepsasports.com
 ELEMENTARY_EMAIL_TEMPLATE = """
 Hello {{ contact_name }},
 
-My name is {{ user_name }}, and I'm with The Players Sports Academy (PSA) — a nationally recognized nonprofit specializing in after-school athletic enrichment for elementary students.
+My name is {{ user_name }}, and I'm with The Players Sports Academy (PSA) - a nationally recognized nonprofit specializing in after-school athletic enrichment for elementary students.
 
 It was a pleasure visiting {{ school_name }} recently! I'd love to share more information about our comprehensive sports programs designed for elementary-aged children.
 
@@ -944,8 +944,8 @@ def send_email_with_attachments(from_email, from_password, to_email, subject, bo
         msg['To'] = to_email
         msg['Subject'] = subject
         
-        # Add body to email
-        msg.attach(MIMEText(body, 'plain'))
+        # Add body to email with proper encoding
+        msg.attach(MIMEText(body, 'plain', 'utf-8'))  # Specify UTF-8 encoding
         
         # Define the path where PDFs are stored
         pdf_directory = os.path.join(os.path.dirname(__file__), 'pdf_attachments')
@@ -986,9 +986,10 @@ def send_email_with_attachments(from_email, from_password, to_email, subject, bo
         server.starttls()  # Enable security
         server.login(from_email, from_password)
         
-        # Send email
+        # Send email with proper encoding
         text = msg.as_string()
-        server.sendmail(from_email, to_email, text)
+        # Encode the message as UTF-8 bytes before sending
+        server.sendmail(from_email, to_email, text.encode('utf-8'))
         server.quit()
         
         return True
