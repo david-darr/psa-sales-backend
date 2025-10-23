@@ -524,13 +524,13 @@ It was a pleasure visiting {{ school_name }} recently! I'd love to share more in
 PSA TOTS currently works with over 60 preschools in the Northern Virginia area, providing quality sports programs designed specifically for young learners ages 2-5.
 
 Here's why preschools and families love working with PSA:
-• On-site convenience - Programs run during school hours with no extra work for your team
-• Age-appropriate activities - All programs designed specifically for 2-5 year olds
-• All equipment provided - I bring everything needed for each session
-• Flexible scheduling - Programs available seasonally or year-round
-• Variety of activities - Soccer, Basketball, T-Ball, and Yoga designed for preschoolers
-• Fundraising opportunity - Schools can raise funds through the programs
-• Professional coaching - All coaches are trained in early childhood development
+- On-site convenience - Programs run during school hours with no extra work for your team
+- Age-appropriate activities - All programs designed specifically for 2-5 year olds
+- All equipment provided - I bring everything needed for each session
+- Flexible scheduling - Programs available seasonally or year-round
+- Variety of activities - Soccer, Basketball, T-Ball, and Yoga designed for preschoolers
+- Fundraising opportunity - Schools can raise funds through the programs
+- Professional coaching - All coaches are trained in early childhood development
 
 We would love to set up a free demo session so your students can experience the fun firsthand!
 
@@ -558,10 +558,10 @@ It was a pleasure visiting {{ school_name }} recently! I'd love to share more in
 PSA currently partners with numerous elementary schools in the area, providing quality sports programs that complement your educational mission.
 
 Here's why elementary schools and families choose PSA:
-• No cost to the school - Parents enroll directly, and we offer a revenue-share model to support your PTA or school initiatives.
-• Hassle-free - We handle everything: professional coaches, equipment, registration, and student pick-up after each session.
-• Flexible offerings - Programs run seasonally (6-8 weeks) with options like soccer, basketball, flag football, and more.
-• Community-focused - We provide scholarships and fundraising support to help all students participate.
+- No cost to the school - Parents enroll directly, and we offer a revenue-share model to support your PTA or school initiatives.
+- Hassle-free - We handle everything: professional coaches, equipment, registration, and student pick-up after each session.
+- Flexible offerings - Programs run seasonally (6-8 weeks) with options like soccer, basketball, flag football, and more.
+- Community-focused - We provide scholarships and fundraising support to help all students participate.
 
 We offer both recreational and competitive program options to meet the diverse needs of your student body.
 
@@ -939,13 +939,17 @@ def send_email_with_attachments(from_email, from_password, to_email, subject, bo
     """Send email with PDF attachments using SMTP"""
     try:
         # Create message
-        msg = MIMEMultipart()
+        msg = MIMEMultipart('mixed')  # Specify multipart type
         msg['From'] = f"{from_name} <{from_email}>"
         msg['To'] = to_email
         msg['Subject'] = subject
         
+        # Set charset for the entire message
+        msg.set_charset('utf-8')
+        
         # Add body to email with proper encoding
-        msg.attach(MIMEText(body, 'plain', 'utf-8'))  # Specify UTF-8 encoding
+        text_part = MIMEText(body, 'plain', 'utf-8')
+        msg.attach(text_part)
         
         # Define the path where PDFs are stored
         pdf_directory = os.path.join(os.path.dirname(__file__), 'pdf_attachments')
@@ -957,7 +961,7 @@ def send_email_with_attachments(from_email, from_password, to_email, subject, bo
             if os.path.exists(pdf_path):
                 print(f"DEBUG: Attaching PDF: {pdf_file}")
                 with open(pdf_path, "rb") as attachment:
-                    part = MIMEBase('application', 'octet-stream')
+                    part = MIMEBase('application', 'pdf')
                     part.set_payload(attachment.read())
                 
                 # Encode file in ASCII characters to send by email    
@@ -966,7 +970,7 @@ def send_email_with_attachments(from_email, from_password, to_email, subject, bo
                 # Add header as key/value pair to attachment part
                 part.add_header(
                     'Content-Disposition',
-                    f'attachment; filename= {pdf_file}',
+                    f'attachment; filename="{pdf_file}"',  # Added quotes around filename
                 )
                 
                 # Attach the part to message
@@ -986,10 +990,10 @@ def send_email_with_attachments(from_email, from_password, to_email, subject, bo
         server.starttls()  # Enable security
         server.login(from_email, from_password)
         
-        # Send email with proper encoding
-        text = msg.as_string()
-        # Encode the message as UTF-8 bytes before sending
-        server.sendmail(from_email, to_email, text)
+        # Convert message to string and send
+        # The key fix: use as_bytes() instead of as_string() to handle Unicode properly
+        message_bytes = msg.as_bytes()
+        server.send_message(msg, from_email, [to_email])  # Use send_message instead of sendmail
         server.quit()
         
         return True
