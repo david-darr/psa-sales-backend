@@ -989,7 +989,7 @@ def send_email_with_attachments(from_email, from_password, to_email, subject, bo
         # Send email with proper encoding
         text = msg.as_string()
         # Encode the message as UTF-8 bytes before sending
-        server.sendmail(from_email, to_email, text.encode('utf-8'))
+        server.sendmail(from_email, to_email, text)
         server.quit()
         
         return True
