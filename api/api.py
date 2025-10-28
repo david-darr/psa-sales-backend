@@ -819,7 +819,7 @@ def get_schools():
 @app.route("/api/upload-schools-csv", methods=["POST"])
 @jwt_required()
 def upload_schools_csv():
-    """Upload schools from CSV file"""
+    """Upload schools from CSV file - optimized for large files"""
     try:
         user_id = get_jwt_identity()
         user = User.query.get(user_id)
@@ -879,8 +879,24 @@ def upload_schools_csv():
         except Exception as e:
             return jsonify({"error": f"Error reading CSV headers: {str(e)}"}), 400
         
+        # OPTIMIZATION: Get all existing schools for this user in one query
+        print(f"Loading existing schools for user {user_id}...")
+        existing_schools = SalesSchool.query.filter_by(user_id=user_id).all()
+        existing_school_names = {school.school_name.lower().strip() for school in existing_schools}
+        print(f"Found {len(existing_school_names)} existing schools")
+        
+        # OPTIMIZATION: Collect all valid schools first, then bulk insert
+        schools_to_add = []
+        row_count = 0
+        
         # Process each row
         for row_num, row in enumerate(csv_reader, start=2):  # Start at 2 because row 1 is headers
+            row_count += 1
+            
+            # Progress logging for large files
+            if row_count % 50 == 0:
+                print(f"Processing row {row_count}...")
+            
             try:
                 # Extract data with flexible column matching
                 school_data = {}
@@ -904,6 +920,12 @@ def upload_schools_csv():
                     schools_skipped += 1
                     continue
                 
+                # Clean and validate school name
+                clean_school_name = school_data['school_name'].strip()
+                if clean_school_name.lower() in existing_school_names:
+                    schools_skipped += 1
+                    continue
+                
                 # Set default school type if not provided
                 if not school_data['school_type']:
                     school_data['school_type'] = 'preschool'
@@ -912,19 +934,9 @@ def upload_schools_csv():
                 if school_data['school_type'].lower() not in ['preschool', 'elementary']:
                     school_data['school_type'] = 'preschool'  # Default to preschool
                 
-                # Check if school already exists for this user
-                existing = SalesSchool.query.filter_by(
-                    school_name=school_data['school_name'],
-                    user_id=user_id
-                ).first()
-                
-                if existing:
-                    schools_skipped += 1
-                    continue
-                
-                # Create new school record
-                new_school = SalesSchool(
-                    school_name=school_data['school_name'],
+                # Prepare school object for bulk insert
+                school_obj = SalesSchool(
+                    school_name=clean_school_name,
                     contact_name=school_data['contact_name'],
                     email=school_data['email'],
                     phone=school_data['phone'],
@@ -933,27 +945,70 @@ def upload_schools_csv():
                     user_id=user_id
                 )
                 
-                db.session.add(new_school)
-                schools_added += 1
+                schools_to_add.append(school_obj)
+                
+                # Add to existing names to prevent duplicates within the same CSV
+                existing_school_names.add(clean_school_name.lower())
                 
             except Exception as e:
                 errors.append(f"Row {row_num}: {str(e)}")
                 schools_skipped += 1
                 continue
         
-        # Commit all changes
-        db.session.commit()
+        print(f"Processed {row_count} rows, preparing to add {len(schools_to_add)} schools...")
+        
+        # OPTIMIZATION: Bulk insert all schools at once
+        if schools_to_add:
+            try:
+                # Use bulk_save_objects for better performance
+                db.session.bulk_save_objects(schools_to_add)
+                db.session.commit()
+                schools_added = len(schools_to_add)
+                print(f"Successfully bulk inserted {schools_added} schools")
+                
+            except Exception as e:
+                print(f"Bulk insert failed, falling back to individual inserts: {str(e)}")
+                # Fallback: Try adding schools individually if bulk insert fails
+                db.session.rollback()
+                
+                for school_obj in schools_to_add:
+                    try:
+                        db.session.add(school_obj)
+                        db.session.flush()  # Flush individual objects
+                        schools_added += 1
+                        
+                        # Commit in batches of 50 to avoid timeout
+                        if schools_added % 50 == 0:
+                            db.session.commit()
+                            print(f"Committed batch: {schools_added} schools added so far...")
+                            
+                    except Exception as individual_error:
+                        db.session.rollback()
+                        errors.append(f"Failed to add school '{school_obj.school_name}': {str(individual_error)}")
+                        schools_skipped += 1
+                
+                # Final commit for remaining schools
+                try:
+                    db.session.commit()
+                    print(f"Final commit: {schools_added} total schools added")
+                except Exception as final_error:
+                    print(f"Final commit failed: {str(final_error)}")
+                    db.session.rollback()
         
         return jsonify({
             "status": "success",
             "schools_added": schools_added,
             "schools_skipped": schools_skipped,
-            "errors": errors,
+            "errors": errors[:10],  # Limit errors to first 10 to avoid response size issues
+            "total_errors": len(errors),
             "message": f"Successfully added {schools_added} schools. {schools_skipped} schools were skipped."
         })
         
     except Exception as e:
         db.session.rollback()
+        print(f"Critical error in CSV upload: {str(e)}")
+        import traceback
+        traceback.print_exc()
         return jsonify({"error": f"Failed to process CSV file: {str(e)}"}), 500
 
 # ====================================================
