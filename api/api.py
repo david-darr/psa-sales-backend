@@ -18,6 +18,8 @@ from math import radians, cos, sin, sqrt, atan2
 from datetime import datetime, timedelta
 import traceback
 import gspread
+import csv
+import io
 
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
@@ -813,6 +815,146 @@ def get_schools():
         {"id": s.id, "name": s.name, "address": s.address, "phone": s.phone, "contact": s.contact, "email": s.email}
         for s in schools
     ])
+
+@app.route("/api/upload-schools-csv", methods=["POST"])
+@jwt_required()
+def upload_schools_csv():
+    """Upload schools from CSV file"""
+    try:
+        user_id = get_jwt_identity()
+        user = User.query.get(user_id)
+        
+        if not user:
+            return jsonify({"error": "User not found"}), 404
+        
+        # Check if file was uploaded
+        if 'file' not in request.files:
+            return jsonify({"error": "No file uploaded"}), 400
+        
+        file = request.files['file']
+        
+        if file.filename == '':
+            return jsonify({"error": "No file selected"}), 400
+        
+        if not file.filename.lower().endswith('.csv'):
+            return jsonify({"error": "File must be a CSV file"}), 400
+        
+        # Read and parse CSV file
+        stream = io.StringIO(file.stream.read().decode("UTF8"), newline=None)
+        csv_reader = csv.DictReader(stream)
+        
+        schools_added = 0
+        schools_skipped = 0
+        errors = []
+        
+        # Expected column names (case insensitive)
+        required_columns = ['school_name', 'email']
+        optional_columns = ['contact_name', 'phone', 'address', 'school_type']
+        
+        # Get the first row to check headers
+        try:
+            headers = csv_reader.fieldnames
+            if not headers:
+                return jsonify({"error": "CSV file appears to be empty"}), 400
+            
+            # Normalize headers (lowercase, remove spaces)
+            normalized_headers = {header.lower().replace(' ', '_').replace('-', '_'): header for header in headers}
+            
+            # Check for required columns
+            missing_required = []
+            for required in required_columns:
+                found = False
+                for norm_header in normalized_headers.keys():
+                    if required in norm_header or norm_header in required:
+                        found = True
+                        break
+                if not found:
+                    missing_required.append(required)
+            
+            if missing_required:
+                return jsonify({
+                    "error": f"Missing required columns: {', '.join(missing_required)}. CSV must contain at least school_name and email columns."
+                }), 400
+            
+        except Exception as e:
+            return jsonify({"error": f"Error reading CSV headers: {str(e)}"}), 400
+        
+        # Process each row
+        for row_num, row in enumerate(csv_reader, start=2):  # Start at 2 because row 1 is headers
+            try:
+                # Extract data with flexible column matching
+                school_data = {}
+                
+                # Map CSV columns to our fields
+                for field in required_columns + optional_columns:
+                    value = None
+                    
+                    # Try to find matching column
+                    for csv_col, csv_val in row.items():
+                        csv_col_norm = csv_col.lower().replace(' ', '_').replace('-', '_')
+                        if field in csv_col_norm or csv_col_norm in field:
+                            value = csv_val.strip() if csv_val else None
+                            break
+                    
+                    school_data[field] = value
+                
+                # Validate required fields
+                if not school_data['school_name'] or not school_data['email']:
+                    errors.append(f"Row {row_num}: Missing school name or email")
+                    schools_skipped += 1
+                    continue
+                
+                # Set default school type if not provided
+                if not school_data['school_type']:
+                    school_data['school_type'] = 'preschool'
+                
+                # Validate school type
+                if school_data['school_type'].lower() not in ['preschool', 'elementary']:
+                    school_data['school_type'] = 'preschool'  # Default to preschool
+                
+                # Check if school already exists for this user
+                existing = SalesSchool.query.filter_by(
+                    school_name=school_data['school_name'],
+                    user_id=user_id
+                ).first()
+                
+                if existing:
+                    schools_skipped += 1
+                    continue
+                
+                # Create new school record
+                new_school = SalesSchool(
+                    school_name=school_data['school_name'],
+                    contact_name=school_data['contact_name'],
+                    email=school_data['email'],
+                    phone=school_data['phone'],
+                    address=school_data['address'],
+                    school_type=school_data['school_type'].lower(),
+                    user_id=user_id
+                )
+                
+                db.session.add(new_school)
+                schools_added += 1
+                
+            except Exception as e:
+                errors.append(f"Row {row_num}: {str(e)}")
+                schools_skipped += 1
+                continue
+        
+        # Commit all changes
+        db.session.commit()
+        
+        return jsonify({
+            "status": "success",
+            "schools_added": schools_added,
+            "schools_skipped": schools_skipped,
+            "errors": errors,
+            "message": f"Successfully added {schools_added} schools. {schools_skipped} schools were skipped."
+        })
+        
+    except Exception as e:
+        db.session.rollback()
+        return jsonify({"error": f"Failed to process CSV file: {str(e)}"}), 500
 
 # ====================================================
 # API ENDPOINTS - EMAIL OPERATIONS
