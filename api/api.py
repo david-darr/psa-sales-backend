@@ -1029,7 +1029,6 @@ def send_email():
 
     user_id = get_jwt_identity()
     user = User.query.get(user_id)
-    print(f"DEBUG: User found: {user.name if user else 'None'}")
     
     if not user:
         return jsonify({"error": "User not found"}), 400
@@ -1037,7 +1036,7 @@ def send_email():
     if not user.email_password:
         return jsonify({"error": "Email settings not configured"}), 400
 
-    # Get selected schools - admins can email any school, regular users only their own
+    # Get selected schools
     if user.admin:
         schools = SalesSchool.query.filter(SalesSchool.id.in_(school_ids)).all()
     else:
@@ -1052,9 +1051,14 @@ def send_email():
     sent_count = 0
     errors = []
 
+    # **KEY FIX**: Process only first 5 schools if more than 5 selected
+    if len(schools) > 5:
+        schools = schools[:5]  # Limit to 5 emails per request
+        print(f"DEBUG: Limited to first 5 schools to avoid timeout")
+
     for school in schools:
         try:
-            print(f"DEBUG: Processing school: {school.school_name} (Type: {school.school_type})")
+            print(f"DEBUG: Processing school: {school.school_name}")
             
             # Choose template, subject, and PDFs based on school type
             if school.school_type == 'preschool':
@@ -1062,7 +1066,7 @@ def send_email():
                 email_subject = f"Fun Sports Programs for {school.school_name} Preschoolers!"
                 pdf_files = [
                     "PSA TOTS year round flyer.pdf",
-                    "PSA TOTS seasonal flyer.pdf",
+                    "PSA TOTS seasonal flyer.pdf", 
                     "PSA TOTS Recommendation (Primrose School).pdf"
                 ]
             else:  # elementary
@@ -1082,7 +1086,7 @@ def send_email():
                 contact_name=school.contact_name or "Director/Administrator"
             )
             
-            # Send email with attachments using SMTP directly
+            # Send email with attachments
             success = send_email_with_attachments(
                 from_email=user.email,
                 from_password=user.email_password,
@@ -1116,21 +1120,20 @@ def send_email():
             error_msg = f"Failed to send to {school.school_name}: {str(e)}"
             print(f"DEBUG ERROR: {error_msg}")
             errors.append(error_msg)
-            traceback.print_exc()
     
     try:
         db.session.commit()
         print(f"DEBUG: Database committed successfully")
     except Exception as e:
         print(f"DEBUG: Database commit error: {str(e)}")
+        db.session.rollback()
     
-    result = {
-        "status": f"{sent_count} emails sent" if sent_count > 0 else "Failed to send emails",
+    return jsonify({
+        "status": f"{sent_count} emails sent successfully" if sent_count > 0 else "Failed to send emails",
         "sent_count": sent_count,
+        "total_schools": len(schools),
         "errors": errors
-    }
-    
-    return jsonify(result)
+    })
 
 def send_email_with_attachments(from_email, from_password, to_email, subject, body, pdf_files, from_name):
     """Send email with PDF attachments using SMTP"""
