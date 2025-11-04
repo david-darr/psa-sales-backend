@@ -21,6 +21,7 @@ import gspread
 import csv
 import io
 import threading
+import traceback
 import queue
 import uuid
 
@@ -67,7 +68,9 @@ app = Flask(__name__)
 CORS(app, supports_credentials=True, origins=[
     "https://psasales-6l22ucils-david-darrs-projects.vercel.app",
     "https://www.salespsa.com",
-    "https://salespsa.com"
+    "https://salespsa.com",
+    "http://localhost:3000",  # For local development
+    "http://localhost:5173"   # For Vite dev server
 ])
 
 # Database Configuration
@@ -1354,4 +1357,216 @@ def send_email():
             print(f"DEBUG: Critical error in send_email: {str(e)}")
             traceback.print_exc()
             return jsonify({"error": f"Failed to send emails: {str(e)}"}), 500
+
+@app.route("/api/sent-emails", methods=["GET"])
+@jwt_required()
+def get_sent_emails():
+    """Get sent emails for the current user"""
+    try:
+        user_id = get_jwt_identity()
+        user = User.query.get(user_id)
+        
+        if not user:
+            return jsonify({"error": "User not found"}), 404
+        
+        # If admin, return all sent emails; otherwise, return only user's emails
+        if user.admin:
+            sent_emails = SentEmail.query.order_by(SentEmail.sent_at.desc()).all()
+        else:
+            sent_emails = SentEmail.query.filter_by(user_id=user_id).order_by(SentEmail.sent_at.desc()).all()
+        
+        return jsonify([
+            {
+                "id": email.id,
+                "school_name": email.school_name,
+                "school_email": email.school_email,
+                "sent_at": email.sent_at.isoformat(),
+                "responded": email.responded,
+                "followup_sent": email.followup_sent,
+                "user_name": email.user.name if hasattr(email, 'user') and email.user else None
+            }
+            for email in sent_emails
+        ])
+        
+    except Exception as e:
+        print(f"Error in get_sent_emails: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        return jsonify({"error": f"Failed to fetch sent emails: {str(e)}"}), 500
+
+@app.route("/api/delete-sent-email", methods=["DELETE"])
+@jwt_required()
+def delete_sent_email():
+    """Delete a sent email record"""
+    try:
+        data = request.get_json()
+        email_id = data.get("email_id")
+        
+        if not email_id:
+            return jsonify({"error": "Email ID required"}), 400
+        
+        user_id = get_jwt_identity()
+        user = User.query.get(user_id)
+        
+        if not user:
+            return jsonify({"error": "User not found"}), 404
+        
+        # Get the email record
+        if user.admin:
+            email_record = SentEmail.query.get(email_id)
+        else:
+            email_record = SentEmail.query.filter_by(id=email_id, user_id=user_id).first()
+        
+        if not email_record:
+            return jsonify({"error": "Email record not found"}), 404
+        
+        db.session.delete(email_record)
+        db.session.commit()
+        
+        return jsonify({"message": "Email record deleted successfully"})
+        
+    except Exception as e:
+        print(f"Error in delete_sent_email: {str(e)}")
+        db.session.rollback()
+        return jsonify({"error": f"Failed to delete email record: {str(e)}"}), 500
+
+@app.route("/api/mark-email-responded", methods=["POST"])
+@jwt_required()
+def mark_email_responded():
+    """Mark an email as responded"""
+    try:
+        data = request.get_json()
+        email_id = data.get("email_id")
+        
+        if not email_id:
+            return jsonify({"error": "Email ID required"}), 400
+        
+        user_id = get_jwt_identity()
+        user = User.query.get(user_id)
+        
+        if not user:
+            return jsonify({"error": "User not found"}), 404
+        
+        # Get the email record
+        if user.admin:
+            email_record = SentEmail.query.get(email_id)
+        else:
+            email_record = SentEmail.query.filter_by(id=email_id, user_id=user_id).first()
+        
+        if not email_record:
+            return jsonify({"error": "Email record not found"}), 404
+        
+        email_record.responded = True
+        db.session.commit()
+        
+        return jsonify({"message": "Email marked as responded"})
+        
+    except Exception as e:
+        print(f"Error in mark_email_responded: {str(e)}")
+        db.session.rollback()
+        return jsonify({"error": f"Failed to mark email as responded: {str(e)}"}), 500
+
+@app.route("/api/send-followup", methods=["POST"])
+@jwt_required()
+def send_followup():
+    """Send a follow-up email"""
+    try:
+        data = request.get_json()
+        email_id = data.get("email_id")
+        
+        if not email_id:
+            return jsonify({"error": "Email ID required"}), 400
+        
+        user_id = get_jwt_identity()
+        user = User.query.get(user_id)
+        
+        if not user:
+            return jsonify({"error": "User not found"}), 404
+        
+        if not user.email_password:
+            return jsonify({"error": "Email settings not configured"}), 400
+        
+        # Get the email record
+        if user.admin:
+            email_record = SentEmail.query.get(email_id)
+        else:
+            email_record = SentEmail.query.filter_by(id=email_id, user_id=user_id).first()
+        
+        if not email_record:
+            return jsonify({"error": "Email record not found"}), 404
+        
+        # Get the school information
+        if user.admin:
+            school = SalesSchool.query.filter_by(email=email_record.school_email).first()
+        else:
+            school = SalesSchool.query.filter_by(
+                email=email_record.school_email, 
+                user_id=user_id
+            ).first()
+        
+        if not school:
+            return jsonify({"error": "School not found"}), 404
+        
+        # Choose follow-up template based on school type
+        if school.school_type == 'preschool':
+            followup_template = PRESCHOOL_FOLLOWUP_TEMPLATE
+        else:
+            followup_template = ELEMENTARY_FOLLOWUP_TEMPLATE
+        
+        # Create follow-up email body
+        body = render_template_string(
+            followup_template,
+            user_name=user.name,
+            user_email=user.email,
+            school_name=school.school_name,
+            contact_name=school.contact_name or "Director/Administrator"
+        )
+        
+        # Send follow-up email
+        success = send_email_with_attachments_rate_limited(
+            from_email=user.email,
+            from_password=user.email_password,
+            to_email=school.email,
+            subject="Follow-up: Let's Connect! PSA Programs",
+            body=body,
+            pdf_files=[],  # No PDFs for follow-up
+            from_name=user.name
+        )
+        
+        if success:
+            # Update sent email record
+            email_record.followup_sent = True
+            db.session.commit()
+            
+            return jsonify({"message": "Follow-up email sent successfully"})
+        else:
+            return jsonify({"error": "Failed to send follow-up email"}), 500
+    
+    except Exception as e:
+        print(f"Error in send_followup: {str(e)}")
+        db.session.rollback()
+        return jsonify({"error": f"Failed to send follow-up email: {str(e)}"}), 500
+
+# ====================================================
+# ERROR HANDLING
+# ====================================================
+
+@app.errorhandler(404)
+def not_found(error):
+    return jsonify({"error": "Not found"}), 404
+
+@app.errorhandler(500)
+def internal_error(error):
+    return jsonify({"error": "Internal server error"}), 500
+
+# ====================================================
+# APP RUNNER
+# ====================================================
+
+if __name__ == "__main__":
+    # For local development, enable CORS for all origins
+    if os.getenv("FLASK_ENV") == "development":
+        CORS(app, supports_credentials=True, origins="*")
+    
+    app.run(host="0.0.0.0", port=int(os.getenv("PORT", 5000)), debug=True)
 
