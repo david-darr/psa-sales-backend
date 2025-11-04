@@ -1082,7 +1082,7 @@ def send_email():
                 contact_name=school.contact_name or "Director/Administrator"
             )
             
-            # Send email with attachments
+            # Send email with attachments using SMTP directly
             success = send_email_with_attachments(
                 from_email=user.email,
                 from_password=user.email_password,
@@ -1123,24 +1123,25 @@ def send_email():
         print(f"DEBUG: Database committed successfully")
     except Exception as e:
         print(f"DEBUG: Database commit error: {str(e)}")
-        db.session.rollback()
     
-    # Return success response
-    return jsonify({
-        "status": f"{sent_count} emails sent successfully" if sent_count > 0 else "Failed to send emails",
+    result = {
+        "status": f"{sent_count} emails sent" if sent_count > 0 else "Failed to send emails",
         "sent_count": sent_count,
-        "total_schools": len(schools),
         "errors": errors
-    })
+    }
+    
+    return jsonify(result)
 
 def send_email_with_attachments(from_email, from_password, to_email, subject, body, pdf_files, from_name):
     """Send email with PDF attachments using SMTP"""
     try:
         # Create message
-        msg = MIMEMultipart('mixed')
+        msg = MIMEMultipart('mixed')  # Specify multipart type
         msg['From'] = f"{from_name} <{from_email}>"
         msg['To'] = to_email
         msg['Subject'] = subject
+        
+        # Set charset for the entire message
         msg.set_charset('utf-8')
         
         # Add body to email with proper encoding
@@ -1155,20 +1156,41 @@ def send_email_with_attachments(from_email, from_password, to_email, subject, bo
             pdf_path = os.path.join(pdf_directory, pdf_file)
             
             if os.path.exists(pdf_path):
+                print(f"DEBUG: Attaching PDF: {pdf_file}")
                 with open(pdf_path, "rb") as attachment:
                     part = MIMEBase('application', 'pdf')
                     part.set_payload(attachment.read())
+                
+                # Encode file in ASCII characters to send by email    
                 encoders.encode_base64(part)
-                part.add_header('Content-Disposition', f'attachment; filename="{pdf_file}"')
+                
+                # Add header as key/value pair to attachment part
+                part.add_header(
+                    'Content-Disposition',
+                    f'attachment; filename="{pdf_file}"',  # Added quotes around filename
+                )
+                
+                # Attach the part to message
                 msg.attach(part)
             else:
-                print(f"DEBUG: PDF file not found: {pdf_path}")
+                print(f"WARNING: PDF file not found: {pdf_path}")
+                print(f"DEBUG: Looking for file at: {pdf_path}")
+                # List files in the directory for debugging
+                if os.path.exists(pdf_directory):
+                    files_in_dir = os.listdir(pdf_directory)
+                    print(f"DEBUG: Files in pdf_attachments directory: {files_in_dir}")
+                else:
+                    print(f"DEBUG: pdf_attachments directory does not exist at: {pdf_directory}")
         
         # Create SMTP session
         server = smtplib.SMTP('smtp.gmail.com', 587)
-        server.starttls()
+        server.starttls()  # Enable security
         server.login(from_email, from_password)
-        server.send_message(msg, from_email, [to_email])
+        
+        # Convert message to string and send
+        # The key fix: use as_bytes() instead of as_string() to handle Unicode properly
+        message_bytes = msg.as_bytes()
+        server.send_message(msg, from_email, [to_email])  # Use send_message instead of sendmail
         server.quit()
         
         return True
