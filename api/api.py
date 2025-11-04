@@ -1219,12 +1219,16 @@ email_worker_thread.start()
 def send_email():
     data = request.get_json()
     school_ids = data.get("school_ids", [])
+    subject = data.get("subject", "Let's Connect! PSA Programs")
+    
+    print(f"DEBUG: Received school_ids: {school_ids}")
     
     if not school_ids:
         return jsonify({"error": "No schools selected"}), 400
 
     user_id = get_jwt_identity()
     user = User.query.get(user_id)
+    print(f"DEBUG: User found: {user.name if user else 'None'}")
     
     if not user:
         return jsonify({"error": "User not found"}), 400
@@ -1248,68 +1252,106 @@ def send_email():
             "message": f"Email job queued for {len(school_ids)} schools. Use /api/email-job-status/{job_id} to check progress."
         })
     else:
-        # For small batches, process synchronously (existing logic)
-        # ... keep your existing synchronous code for small batches
-        pass
-
-@app.route("/api/email-job-status/<job_id>", methods=["GET"])
-@jwt_required()
-def get_email_job_status(job_id):
-    if job_id not in EMAIL_JOBS:
-        return jsonify({"error": "Job not found"}), 404
-    
-    job = EMAIL_JOBS[job_id]
-    user_id = get_jwt_identity()
-    
-    # Only allow users to see their own jobs (or admins see all)
-    user = User.query.get(user_id)
-    if not user.admin and job.user_id != user_id:
-        return jsonify({"error": "Unauthorized"}), 403
-    
-    duration = None
-    if job.start_time:
-        end_time = job.end_time or datetime.utcnow()
-        duration = int((end_time - job.start_time).total_seconds())
-    
-    return jsonify({
-        "job_id": job_id,
-        "status": job.status,
-        "total_schools": job.total_schools,
-        "sent_count": job.sent_count,
-        "error_count": len(job.errors),
-        "errors": job.errors[-5:],  # Last 5 errors only
-        "progress_percentage": round((job.sent_count / job.total_schools) * 100, 1) if job.total_schools > 0 else 0,
-        "duration_seconds": duration,
-        "start_time": job.start_time.isoformat() if job.start_time else None,
-        "end_time": job.end_time.isoformat() if job.end_time else None
-    })
-
-@app.route("/api/email-jobs", methods=["GET"])
-@jwt_required()
-def get_email_jobs():
-    user_id = get_jwt_identity()
-    user = User.query.get(user_id)
-    
-    jobs = []
-    for job_id, job in EMAIL_JOBS.items():
-        # Only show user's own jobs (or all for admins)
-        if user.admin or job.user_id == user_id:
-            duration = None
-            if job.start_time:
-                end_time = job.end_time or datetime.utcnow()
-                duration = int((end_time - job.start_time).total_seconds())
+        # For small batches, process synchronously
+        try:
+            # Get selected schools - admins can email any school, regular users only their own
+            if user.admin:
+                schools = SalesSchool.query.filter(SalesSchool.id.in_(school_ids)).all()
+            else:
+                schools = SalesSchool.query.filter(
+                    SalesSchool.id.in_(school_ids),
+                    SalesSchool.user_id == user_id
+                ).all()
             
-            jobs.append({
-                "job_id": job_id,
-                "status": job.status,
-                "total_schools": job.total_schools,
-                "sent_count": job.sent_count,
-                "error_count": len(job.errors),
-                "progress_percentage": round((job.sent_count / job.total_schools) * 100, 1) if job.total_schools > 0 else 0,
-                "duration_seconds": duration,
-                "start_time": job.start_time.isoformat() if job.start_time else None,
-                "end_time": job.end_time.isoformat() if job.end_time else None
+            if not schools:
+                return jsonify({"error": "No valid schools found"}), 400
+
+            sent_count = 0
+            errors = []
+
+            for school in schools:
+                try:
+                    print(f"DEBUG: Processing school: {school.school_name} (Type: {school.school_type})")
+                    
+                    # Choose template, subject, and PDFs based on school type
+                    if school.school_type == 'preschool':
+                        email_template = PRESCHOOL_EMAIL_TEMPLATE
+                        email_subject = f"Fun Sports Programs for {school.school_name} Preschoolers!"
+                        pdf_files = [
+                            "PSA TOTS year round flyer.pdf",
+                            "PSA TOTS seasonal flyer.pdf",
+                            "PSA TOTS Recommendation (Primrose School).pdf"
+                        ]
+                    else:  # elementary
+                        email_template = ELEMENTARY_EMAIL_TEMPLATE
+                        email_subject = f"Sports Programs for {school.school_name} Students"
+                        pdf_files = [
+                            "PSA After School.pdf",
+                            "PSA Recommendation Letter (Madison Trust ES).pdf"
+                        ]
+                    
+                    # Create email body
+                    body = render_template_string(
+                        email_template,
+                        user_name=user.name,
+                        user_email=user.email,
+                        school_name=school.school_name,
+                        contact_name=school.contact_name or "Director/Administrator"
+                    )
+                    
+                    # Send email with attachments
+                    success = send_email_with_attachments_rate_limited(
+                        from_email=user.email,
+                        from_password=user.email_password,
+                        to_email=school.email,
+                        subject=email_subject,
+                        body=body,
+                        pdf_files=pdf_files,
+                        from_name=user.name
+                    )
+                    
+                    if success:
+                        print(f"DEBUG: Email sent successfully to {school.email}")
+                        
+                        # Log the email
+                        new_email = SentEmail(
+                            school_name=school.school_name,
+                            school_email=school.email,
+                            user_id=user_id,
+                            responded=False,
+                            followup_sent=False
+                        )
+                        db.session.add(new_email)
+                        
+                        # Update school status
+                        school.status = 'contacted'
+                        sent_count += 1
+                    else:
+                        errors.append(f"Failed to send to {school.school_name}")
+                    
+                except Exception as e:
+                    error_msg = f"Failed to send to {school.school_name}: {str(e)}"
+                    print(f"DEBUG ERROR: {error_msg}")
+                    errors.append(error_msg)
+                    traceback.print_exc()
+            
+            try:
+                db.session.commit()
+                print(f"DEBUG: Database committed successfully")
+            except Exception as e:
+                print(f"DEBUG: Database commit error: {str(e)}")
+                db.session.rollback()
+            
+            # Return success response
+            return jsonify({
+                "status": f"{sent_count} emails sent successfully" if sent_count > 0 else "Failed to send emails",
+                "sent_count": sent_count,
+                "total_schools": len(schools),
+                "errors": errors
             })
-    
-    return jsonify(jobs)
+            
+        except Exception as e:
+            print(f"DEBUG: Critical error in send_email: {str(e)}")
+            traceback.print_exc()
+            return jsonify({"error": f"Failed to send emails: {str(e)}"}), 500
 
