@@ -20,10 +20,6 @@ import traceback
 import gspread
 import csv
 import io
-import threading
-import traceback
-import queue
-import uuid
 
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
@@ -68,9 +64,7 @@ app = Flask(__name__)
 CORS(app, supports_credentials=True, origins=[
     "https://psasales-6l22ucils-david-darrs-projects.vercel.app",
     "https://www.salespsa.com",
-    "https://salespsa.com",
-    "http://localhost:3000",  # For local development
-    "http://localhost:5173"   # For Vite dev server
+    "https://salespsa.com"
 ])
 
 # Database Configuration
@@ -1021,202 +1015,6 @@ def upload_schools_csv():
 # API ENDPOINTS - EMAIL OPERATIONS
 # ====================================================
 
-# Add email job tracking
-EMAIL_JOBS = {}
-email_queue = queue.Queue()
-
-class EmailJob:
-    def __init__(self, job_id, user_id, school_ids, total_schools):
-        self.job_id = job_id
-        self.user_id = user_id
-        self.school_ids = school_ids
-        self.total_schools = total_schools
-        self.status = "queued"  # queued, processing, completed, error
-        self.sent_count = 0
-        self.errors = []
-        self.start_time = None
-        self.end_time = None
-
-def background_email_worker():
-    """Background worker that processes email jobs"""
-    while True:
-        try:
-            job = email_queue.get(timeout=30)  # Wait up to 30 seconds for a job
-            if job is None:  # Shutdown signal
-                break
-                
-            EMAIL_JOBS[job.job_id].status = "processing"
-            EMAIL_JOBS[job.job_id].start_time = datetime.utcnow()
-            
-            with app.app_context():
-                process_email_job(job)
-                
-            email_queue.task_done()
-            
-        except queue.Empty:
-            continue  # No job available, keep waiting
-        except Exception as e:
-            print(f"Background email worker error: {str(e)}")
-            if 'job' in locals():
-                EMAIL_JOBS[job.job_id].status = "error"
-                EMAIL_JOBS[job.job_id].errors.append(f"Worker error: {str(e)}")
-
-def process_email_job(job):
-    """Process a single email job"""
-    try:
-        user = User.query.get(job.user_id)
-        if not user or not user.email_password:
-            raise Exception("User not found or email not configured")
-
-        # Get schools in batches to avoid memory issues
-        batch_size = 50
-        
-        for i in range(0, len(job.school_ids), batch_size):
-            batch_ids = job.school_ids[i:i + batch_size]
-            
-            if user.admin:
-                schools = SalesSchool.query.filter(SalesSchool.id.in_(batch_ids)).all()
-            else:
-                schools = SalesSchool.query.filter(
-                    SalesSchool.id.in_(batch_ids),
-                    SalesSchool.user_id == job.user_id
-                ).all()
-
-            # Process each school in the batch
-            for school in schools:
-                try:
-                    # Determine email template and attachments
-                    if school.school_type == 'preschool':
-                        email_template = PRESCHOOL_EMAIL_TEMPLATE
-                        email_subject = f"Fun Sports Programs for {school.school_name} Preschoolers!"
-                        pdf_files = [
-                            "PSA TOTS year round flyer.pdf",
-                            "PSA TOTS seasonal flyer.pdf",
-                            "PSA TOTS Recommendation (Primrose School).pdf"
-                        ]
-                    else:  # elementary
-                        email_template = ELEMENTARY_EMAIL_TEMPLATE
-                        email_subject = f"Sports Programs for {school.school_name} Students"
-                        pdf_files = [
-                            "PSA After School.pdf",
-                            "PSA Recommendation Letter (Madison Trust ES).pdf"
-                        ]
-                    
-                    # Create email body
-                    body = render_template_string(
-                        email_template,
-                        user_name=user.name,
-                        user_email=user.email,
-                        school_name=school.school_name,
-                        contact_name=school.contact_name or "Director/Administrator"
-                    )
-                    
-                    # Send email with rate limiting
-                    success = send_email_with_attachments_rate_limited(
-                        from_email=user.email,
-                        from_password=user.email_password,
-                        to_email=school.email,
-                        subject=email_subject,
-                        body=body,
-                        pdf_files=pdf_files,
-                        from_name=user.name
-                    )
-                    
-                    if success:
-                        # Log the email
-                        new_email = SentEmail(
-                            school_name=school.school_name,
-                            school_email=school.email,
-                            user_id=job.user_id,
-                            responded=False,
-                            followup_sent=False
-                        )
-                        db.session.add(new_email)
-                        
-                        # Update school status
-                        school.status = 'contacted'
-                        job.sent_count += 1
-                    else:
-                        job.errors.append(f"Failed to send to {school.school_name}")
-                        
-                except Exception as e:
-                    error_msg = f"Failed to send to {school.school_name}: {str(e)}"
-                    job.errors.append(error_msg)
-                    print(f"Email error: {error_msg}")
-            
-            # Commit batch and add delay between batches
-            try:
-                db.session.commit()
-                # Rate limiting: 1 second delay between batches
-                time.sleep(1)
-            except Exception as e:
-                db.session.rollback()
-                job.errors.append(f"Database commit error: {str(e)}")
-        
-        # Mark job as completed
-        EMAIL_JOBS[job.job_id].status = "completed"
-        EMAIL_JOBS[job.job_id].end_time = datetime.utcnow()
-        
-    except Exception as e:
-        EMAIL_JOBS[job.job_id].status = "error"
-        EMAIL_JOBS[job.job_id].end_time = datetime.utcnow()
-        EMAIL_JOBS[job.job_id].errors.append(f"Job processing error: {str(e)}")
-        print(f"Email job error: {str(e)}")
-
-def send_email_with_attachments_rate_limited(from_email, from_password, to_email, subject, body, pdf_files, from_name):
-    """Send email with rate limiting and retry logic"""
-    max_retries = 3
-    retry_delay = 2  # seconds
-    
-    for attempt in range(max_retries):
-        try:
-            # Create a new SMTP connection for each email to avoid timeouts
-            msg = MIMEMultipart('mixed')
-            msg['From'] = f"{from_name} <{from_email}>"
-            msg['To'] = to_email
-            msg['Subject'] = subject
-            msg.set_charset('utf-8')
-            
-            # Add body
-            text_part = MIMEText(body, 'plain', 'utf-8')
-            msg.attach(text_part)
-            
-            # Attach PDFs
-            pdf_directory = os.path.join(os.path.dirname(__file__), 'pdf_attachments')
-            for pdf_file in pdf_files:
-                pdf_path = os.path.join(pdf_directory, pdf_file)
-                if os.path.exists(pdf_path):
-                    with open(pdf_path, "rb") as attachment:
-                        part = MIMEBase('application', 'pdf')
-                        part.set_payload(attachment.read())
-                    encoders.encode_base64(part)
-                    part.add_header('Content-Disposition', f'attachment; filename="{pdf_file}"')
-                    msg.attach(part)
-            
-            # Send with shorter timeout
-            server = smtplib.SMTP('smtp.gmail.com', 587, timeout=30)
-            server.starttls()
-            server.login(from_email, from_password)
-            server.send_message(msg, from_email, [to_email])
-            server.quit()
-            
-            # Small delay between emails to avoid rate limiting
-            time.sleep(0.5)
-            return True
-            
-        except Exception as e:
-            print(f"Email send attempt {attempt + 1} failed: {str(e)}")
-            if attempt < max_retries - 1:
-                time.sleep(retry_delay * (attempt + 1))  # Exponential backoff
-            else:
-                return False
-    
-    return False
-
-# Start background worker thread
-email_worker_thread = threading.Thread(target=background_email_worker, daemon=True)
-email_worker_thread.start()
-
 @app.route("/api/send-email", methods=["POST"])
 @jwt_required()
 def send_email():
@@ -1239,334 +1037,599 @@ def send_email():
     if not user.email_password:
         return jsonify({"error": "Email settings not configured"}), 400
 
-    # For large batches, use background processing
-    if len(school_ids) > 20:
-        # Create a background job
-        job_id = str(uuid.uuid4())
-        job = EmailJob(job_id, user_id, school_ids, len(school_ids))
-        EMAIL_JOBS[job_id] = job
-        
-        # Queue the job
-        email_queue.put(job)
-        
-        return jsonify({
-            "status": "job_queued",
-            "job_id": job_id,
-            "message": f"Email job queued for {len(school_ids)} schools. Use /api/email-job-status/{job_id} to check progress."
-        })
+    # Get selected schools - admins can email any school, regular users only their own
+    if user.admin:
+        schools = SalesSchool.query.filter(SalesSchool.id.in_(school_ids)).all()
     else:
-        # For small batches, process synchronously
+        schools = SalesSchool.query.filter(
+            SalesSchool.id.in_(school_ids),
+            SalesSchool.user_id == user_id
+        ).all()
+    
+    if not schools:
+        return jsonify({"error": "No valid schools found"}), 400
+
+    sent_count = 0
+    errors = []
+
+    for school in schools:
         try:
-            # Get selected schools - admins can email any school, regular users only their own
-            if user.admin:
-                schools = SalesSchool.query.filter(SalesSchool.id.in_(school_ids)).all()
+            print(f"DEBUG: Processing school: {school.school_name} (Type: {school.school_type})")
+            
+            # Choose template, subject, and PDFs based on school type
+            if school.school_type == 'preschool':
+                email_template = PRESCHOOL_EMAIL_TEMPLATE
+                email_subject = f"Fun Sports Programs for {school.school_name} Preschoolers!"
+                pdf_files = [
+                    "PSA TOTS year round flyer.pdf",
+                    "PSA TOTS seasonal flyer.pdf",
+                    "PSA TOTS Recommendation (Primrose School).pdf"
+                ]
+            else:  # elementary
+                email_template = ELEMENTARY_EMAIL_TEMPLATE
+                email_subject = f"Sports Programs for {school.school_name} Students"
+                pdf_files = [
+                    "PSA After School.pdf",
+                    "PSA Recommendation Letter (Madison Trust ES).pdf"
+                ]
+            
+            # Create email body
+            body = render_template_string(
+                email_template,
+                user_name=user.name,
+                user_email=user.email,
+                school_name=school.school_name,
+                contact_name=school.contact_name or "Director/Administrator"
+            )
+            
+            # Send email with attachments using SMTP directly
+            success = send_email_with_attachments(
+                from_email=user.email,
+                from_password=user.email_password,
+                to_email=school.email,
+                subject=email_subject,
+                body=body,
+                pdf_files=pdf_files,
+                from_name=user.name
+            )
+            
+            if success:
+                print(f"DEBUG: Email sent successfully to {school.email}")
+                
+                # Log the email
+                new_email = SentEmail(
+                    school_name=school.school_name,
+                    school_email=school.email,
+                    user_id=user_id,
+                    responded=False,
+                    followup_sent=False
+                )
+                db.session.add(new_email)
+                
+                # Update school status
+                school.status = 'contacted'
+                sent_count += 1
             else:
-                schools = SalesSchool.query.filter(
-                    SalesSchool.id.in_(school_ids),
-                    SalesSchool.user_id == user_id
-                ).all()
-            
-            if not schools:
-                return jsonify({"error": "No valid schools found"}), 400
-
-            sent_count = 0
-            errors = []
-
-            for school in schools:
-                try:
-                    print(f"DEBUG: Processing school: {school.school_name} (Type: {school.school_type})")
-                    
-                    # Choose template, subject, and PDFs based on school type
-                    if school.school_type == 'preschool':
-                        email_template = PRESCHOOL_EMAIL_TEMPLATE
-                        email_subject = f"Fun Sports Programs for {school.school_name} Preschoolers!"
-                        pdf_files = [
-                            "PSA TOTS year round flyer.pdf",
-                            "PSA TOTS seasonal flyer.pdf",
-                            "PSA TOTS Recommendation (Primrose School).pdf"
-                        ]
-                    else:  # elementary
-                        email_template = ELEMENTARY_EMAIL_TEMPLATE
-                        email_subject = f"Sports Programs for {school.school_name} Students"
-                        pdf_files = [
-                            "PSA After School.pdf",
-                            "PSA Recommendation Letter (Madison Trust ES).pdf"
-                        ]
-                    
-                    # Create email body
-                    body = render_template_string(
-                        email_template,
-                        user_name=user.name,
-                        user_email=user.email,
-                        school_name=school.school_name,
-                        contact_name=school.contact_name or "Director/Administrator"
-                    )
-                    
-                    # Send email with attachments
-                    success = send_email_with_attachments_rate_limited(
-                        from_email=user.email,
-                        from_password=user.email_password,
-                        to_email=school.email,
-                        subject=email_subject,
-                        body=body,
-                        pdf_files=pdf_files,
-                        from_name=user.name
-                    )
-                    
-                    if success:
-                        print(f"DEBUG: Email sent successfully to {school.email}")
-                        
-                        # Log the email
-                        new_email = SentEmail(
-                            school_name=school.school_name,
-                            school_email=school.email,
-                            user_id=user_id,
-                            responded=False,
-                            followup_sent=False
-                        )
-                        db.session.add(new_email)
-                        
-                        # Update school status
-                        school.status = 'contacted'
-                        sent_count += 1
-                    else:
-                        errors.append(f"Failed to send to {school.school_name}")
-                    
-                except Exception as e:
-                    error_msg = f"Failed to send to {school.school_name}: {str(e)}"
-                    print(f"DEBUG ERROR: {error_msg}")
-                    errors.append(error_msg)
-                    traceback.print_exc()
-            
-            try:
-                db.session.commit()
-                print(f"DEBUG: Database committed successfully")
-            except Exception as e:
-                print(f"DEBUG: Database commit error: {str(e)}")
-                db.session.rollback()
-            
-            # Return success response
-            return jsonify({
-                "status": f"{sent_count} emails sent successfully" if sent_count > 0 else "Failed to send emails",
-                "sent_count": sent_count,
-                "total_schools": len(schools),
-                "errors": errors
-            })
+                errors.append(f"Failed to send to {school.school_name}")
             
         except Exception as e:
-            print(f"DEBUG: Critical error in send_email: {str(e)}")
+            error_msg = f"Failed to send to {school.school_name}: {str(e)}"
+            print(f"DEBUG ERROR: {error_msg}")
+            errors.append(error_msg)
             traceback.print_exc()
-            return jsonify({"error": f"Failed to send emails: {str(e)}"}), 500
+    
+    try:
+        db.session.commit()
+        print(f"DEBUG: Database committed successfully")
+    except Exception as e:
+        print(f"DEBUG: Database commit error: {str(e)}")
+    
+    result = {
+        "status": f"{sent_count} emails sent" if sent_count > 0 else "Failed to send emails",
+        "sent_count": sent_count,
+        "errors": errors
+    }
+    
+    return jsonify(result)
+
+def send_email_with_attachments(from_email, from_password, to_email, subject, body, pdf_files, from_name):
+    """Send email with PDF attachments using SMTP"""
+    try:
+        # Create message
+        msg = MIMEMultipart('mixed')  # Specify multipart type
+        msg['From'] = f"{from_name} <{from_email}>"
+        msg['To'] = to_email
+        msg['Subject'] = subject
+        
+        # Set charset for the entire message
+        msg.set_charset('utf-8')
+        
+        # Add body to email with proper encoding
+        text_part = MIMEText(body, 'plain', 'utf-8')
+        msg.attach(text_part)
+        
+        # Define the path where PDFs are stored
+        pdf_directory = os.path.join(os.path.dirname(__file__), 'pdf_attachments')
+        
+        # Attach PDF files
+        for pdf_file in pdf_files:
+            pdf_path = os.path.join(pdf_directory, pdf_file)
+            
+            if os.path.exists(pdf_path):
+                print(f"DEBUG: Attaching PDF: {pdf_file}")
+                with open(pdf_path, "rb") as attachment:
+                    part = MIMEBase('application', 'pdf')
+                    part.set_payload(attachment.read())
+                
+                # Encode file in ASCII characters to send by email    
+                encoders.encode_base64(part)
+                
+                # Add header as key/value pair to attachment part
+                part.add_header(
+                    'Content-Disposition',
+                    f'attachment; filename="{pdf_file}"',  # Added quotes around filename
+                )
+                
+                # Attach the part to message
+                msg.attach(part)
+            else:
+                print(f"WARNING: PDF file not found: {pdf_path}")
+                print(f"DEBUG: Looking for file at: {pdf_path}")
+                # List files in the directory for debugging
+                if os.path.exists(pdf_directory):
+                    files_in_dir = os.listdir(pdf_directory)
+                    print(f"DEBUG: Files in pdf_attachments directory: {files_in_dir}")
+                else:
+                    print(f"DEBUG: pdf_attachments directory does not exist at: {pdf_directory}")
+        
+        # Create SMTP session
+        server = smtplib.SMTP('smtp.gmail.com', 587)
+        server.starttls()  # Enable security
+        server.login(from_email, from_password)
+        
+        # Convert message to string and send
+        # The key fix: use as_bytes() instead of as_string() to handle Unicode properly
+        message_bytes = msg.as_bytes()
+        server.send_message(msg, from_email, [to_email])  # Use send_message instead of sendmail
+        server.quit()
+        
+        return True
+        
+    except Exception as e:
+        print(f"Error sending email with attachments: {str(e)}")
+        traceback.print_exc()
+        return False
+
+# Also update the followup email function
+@app.route("/api/send-followup", methods=["POST"])
+@jwt_required()
+def send_followup():
+    data = request.get_json()
+    email_id = data.get("email_id")
+    
+    if not email_id:
+        return jsonify({"error": "Missing email_id"}), 400
+
+    user_id = get_jwt_identity()
+    user = User.query.get(user_id)
+    if not user or not user.email_password:
+        return jsonify({"error": "User not connected with email"}), 400
+
+    # Get the original email record
+    original_email = SentEmail.query.filter_by(id=email_id, user_id=user_id).first()
+    if not original_email:
+        return jsonify({"error": "Email not found"}), 404
+
+    if original_email.followup_sent:
+        return jsonify({"error": "Follow-up already sent"}), 400
+
+    # Get the school to determine type
+    school = SalesSchool.query.filter_by(
+        school_name=original_email.school_name,
+        email=original_email.school_email,
+        user_id=user_id
+    ).first()
+    
+    # Choose followup template based on school type
+    if school and school.school_type == 'preschool':
+        followup_template = PRESCHOOL_FOLLOWUP_TEMPLATE
+    else:
+        followup_template = ELEMENTARY_FOLLOWUP_TEMPLATE
+
+    # Send follow-up email
+    followup_body = render_template_string(
+        followup_template,
+        school_name=original_email.school_name,
+        user_name=user.name,
+        user_email=user.email
+    )
+
+    try:
+        # Configure Flask-Mail for this user
+        app.config['MAIL_USERNAME'] = user.email
+        app.config['MAIL_PASSWORD'] = user.email_password
+        app.config['MAIL_DEFAULT_SENDER'] = user.email
+        
+        msg = Message(
+            subject="Follow-Up: PSA Programs",
+            recipients=[original_email.school_email],
+            body=followup_body,
+            sender=user.email
+        )
+        mail.send(msg)
+        
+        original_email.followup_sent = True
+        db.session.commit()
+        return jsonify({"status": "follow-up sent"})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+@app.route("/api/mark-responded", methods=["POST"])
+@jwt_required()
+def mark_responded():
+    data = request.get_json()
+    email_id = data.get("email_id")
+    responded = data.get("responded", True)
+    
+    if not email_id:
+        return jsonify({"error": "Missing email_id"}), 400
+
+    user_id = get_jwt_identity()
+    email_record = SentEmail.query.filter_by(id=email_id, user_id=user_id).first()
+    
+    if not email_record:
+        return jsonify({"error": "Email not found"}), 404
+
+    email_record.responded = responded
+    db.session.commit()
+    return jsonify({"status": "updated"})
 
 @app.route("/api/sent-emails", methods=["GET"])
 @jwt_required()
 def get_sent_emails():
-    """Get sent emails for the current user"""
-    try:
-        user_id = get_jwt_identity()
-        user = User.query.get(user_id)
-        
-        if not user:
-            return jsonify({"error": "User not found"}), 404
-        
-        # If admin, return all sent emails; otherwise, return only user's emails
-        if user.admin:
-            sent_emails = SentEmail.query.order_by(SentEmail.sent_at.desc()).all()
-        else:
-            sent_emails = SentEmail.query.filter_by(user_id=user_id).order_by(SentEmail.sent_at.desc()).all()
-        
-        return jsonify([
-            {
-                "id": email.id,
-                "school_name": email.school_name,
-                "school_email": email.school_email,
-                "sent_at": email.sent_at.isoformat(),
-                "responded": email.responded,
-                "followup_sent": email.followup_sent,
-                "user_name": email.user.name if hasattr(email, 'user') and email.user else None
-            }
-            for email in sent_emails
-        ])
-        
-    except Exception as e:
-        print(f"Error in get_sent_emails: {str(e)}")
-        import traceback
-        traceback.print_exc()
-        return jsonify({"error": f"Failed to fetch sent emails: {str(e)}"}), 500
+    user_id = get_jwt_identity()
+    user = User.query.get(user_id)
+    
+    if not user:
+        return jsonify({"error": "User not found"}), 404
+    
+    # If admin, return all sent emails; otherwise, return only user's emails
+    if user.admin:
+        emails = SentEmail.query.all()
+    else:
+        emails = SentEmail.query.filter_by(user_id=user_id).all()
+    
+    return jsonify([
+        {
+            "id": email.id,
+            "school_name": email.school_name,
+            "school_email": email.school_email,
+            "sent_at": email.sent_at,
+            "responded": email.responded,
+            "followup_sent": email.followup_sent,
+            "user_name": email.user.name if hasattr(email, 'user') else None
+        }
+        for email in emails
+    ])
 
 @app.route("/api/delete-sent-email", methods=["DELETE"])
 @jwt_required()
 def delete_sent_email():
-    """Delete a sent email record"""
+    data = request.get_json()
+    email_id = data.get("email_id")
+    
+    if not email_id:
+        return jsonify({"error": "Missing email_id"}), 400
+
+    user_id = get_jwt_identity()
+    user = User.query.get(user_id)
+    
+    if not user:
+        return jsonify({"error": "User not found"}), 404
+
+    # Find the email record - admins can delete any, users only their own
+    if user.admin:
+        email_record = SentEmail.query.get(email_id)
+    else:
+        email_record = SentEmail.query.filter_by(id=email_id, user_id=user_id).first()
+    
+    if not email_record:
+        return jsonify({"error": "Email record not found"}), 404
+
     try:
-        data = request.get_json()
-        email_id = data.get("email_id")
-        
-        if not email_id:
-            return jsonify({"error": "Email ID required"}), 400
-        
-        user_id = get_jwt_identity()
-        user = User.query.get(user_id)
-        
-        if not user:
-            return jsonify({"error": "User not found"}), 404
-        
-        # Get the email record
-        if user.admin:
-            email_record = SentEmail.query.get(email_id)
-        else:
-            email_record = SentEmail.query.filter_by(id=email_id, user_id=user_id).first()
-        
-        if not email_record:
-            return jsonify({"error": "Email record not found"}), 404
-        
         db.session.delete(email_record)
         db.session.commit()
-        
-        return jsonify({"message": "Email record deleted successfully"})
-        
+        return jsonify({"status": "Email record deleted successfully"})
     except Exception as e:
-        print(f"Error in delete_sent_email: {str(e)}")
-        db.session.rollback()
-        return jsonify({"error": f"Failed to delete email record: {str(e)}"}), 500
+        return jsonify({"error": str(e)}), 500
 
-@app.route("/api/mark-email-responded", methods=["POST"])
-@jwt_required()
-def mark_email_responded():
-    """Mark an email as responded"""
-    try:
-        data = request.get_json()
-        email_id = data.get("email_id")
-        
-        if not email_id:
-            return jsonify({"error": "Email ID required"}), 400
-        
-        user_id = get_jwt_identity()
-        user = User.query.get(user_id)
-        
-        if not user:
-            return jsonify({"error": "User not found"}), 404
-        
-        # Get the email record
-        if user.admin:
-            email_record = SentEmail.query.get(email_id)
-        else:
-            email_record = SentEmail.query.filter_by(id=email_id, user_id=user_id).first()
-        
-        if not email_record:
-            return jsonify({"error": "Email record not found"}), 404
-        
-        email_record.responded = True
-        db.session.commit()
-        
-        return jsonify({"message": "Email marked as responded"})
-        
-    except Exception as e:
-        print(f"Error in mark_email_responded: {str(e)}")
-        db.session.rollback()
-        return jsonify({"error": f"Failed to mark email as responded: {str(e)}"}), 500
+# ====================================================
+# API ENDPOINTS - SCHOOL FINDER
+# ====================================================
 
-@app.route("/api/send-followup", methods=["POST"])
+@app.route("/api/find-schools", methods=["POST"])
+def find_schools():
+    data = request.get_json()
+    address = data.get("address")
+    keywords = data.get("keywords", ["elementary school", "day care", "preschool", "kindercare", "montessori"])
+    if not address:
+        return jsonify({"error": "No address provided"}), 400
+
+    # If address is a zip code or a city, append "USA" to prioritize US geocoding
+    if re.fullmatch(r"\d{5}", address.strip()):
+        address = f"{address.strip()} USA"
+    elif re.fullmatch(r"[a-zA-Z ]+", address.strip()):
+        address = f"{address.strip()} USA"
+
+    # Get normalized names of schools we already do business with
+    happy_feet_names = set([normalize_name(s["name"]) for s in happy_feet])
+    psa_names = set([normalize_name(s["name"]) for s in psa_preschools])
+    excluded_names = happy_feet_names | psa_names
+
+    # Geocode the address
+    lat, lng = geocode_address(address)
+    if lat is None or lng is None:
+        return jsonify({"error": "Address not found"}), 404
+    location = {"lat": lat, "lng": lng}
+
+    # Find nearby schools using Places API
+    places_url = "https://maps.googleapis.com/maps/api/place/nearbysearch/json"
+    base_params = {
+        "location": f"{location['lat']},{location['lng']}",
+        "radius": 5000,
+        "key": GOOGLE_API_KEY
+    }
+
+    results = []
+    for place_type in ["school"]:
+        for kw in keywords:
+            params = base_params.copy()
+            params["type"] = place_type
+            params["keyword"] = kw
+            resp = requests.get(places_url, params=params).json()
+            results.extend(resp.get("results", []))
+
+    # Remove duplicates by place_id
+    unique = {}
+    for result in results:
+        pid = result.get("place_id")
+        if pid and pid not in unique:
+            unique[pid] = result
+
+    # Filter out schools that are already in Happy Feet or PSA tables (fuzzy match)
+    schools = []
+    for result in unique.values():
+        school_name = result.get("name", "")
+        norm_name = normalize_name(school_name)
+        if any(norm_name == ex or norm_name in ex or ex in norm_name for ex in excluded_names):
+            continue
+        schools.append({
+            "name": result.get("name"),
+            "address": result.get("vicinity"),
+            "lat": result["geometry"]["location"]["lat"],
+            "lng": result["geometry"]["location"]["lng"],
+            "place_id": result.get("place_id")
+        })
+
+    return jsonify({
+        "schools": schools,
+        "location": location,
+        "google_api_key": GOOGLE_API_KEY
+    })
+
+# ====================================================
+# API ENDPOINTS - ROUTE PLANNING
+# ====================================================
+
+@app.route("/api/route-plan", methods=["POST"])
+def route_plan():
+    """Calculate shortest route visiting all selected schools."""
+    data = request.get_json()
+    schools = data.get("schools", [])
+    start_address = data.get("start_address")
+    if len(schools) < 2:
+        return jsonify({"error": "Select at least two schools"}), 400
+    if not start_address:
+        return jsonify({"error": "No starting address provided"}), 400
+
+    # Geocode the starting address
+    start_lat, start_lng = geocode_address(start_address)
+    if start_lat is None or start_lng is None:
+        return jsonify({"error": "Starting address not found"}), 404
+
+    # Build distance matrix (from start to each school, and between schools)
+    n = len(schools)
+    dist = [[0]*n for _ in range(n)]
+    for i in range(n):
+        for j in range(n):
+            if i != j:
+                dist[i][j] = haversine(
+                    schools[i]["lat"], schools[i]["lng"],
+                    schools[j]["lat"], schools[j]["lng"]
+                )
+
+    # Calculate distance from start to each school
+    start_to_school = [
+        haversine(start_lat, start_lng, s["lat"], s["lng"]) for s in schools
+    ]
+
+    # Brute-force TSP starting from start location
+    indices = list(range(n))
+    min_order = None
+    min_dist = float('inf')
+    for perm in permutations(indices):
+        d = start_to_school[perm[0]]  # from start to first school
+        d += sum(dist[perm[i]][perm[i+1]] for i in range(n-1))
+        if d < min_dist:
+            min_dist = d
+            min_order = perm
+
+    route = [schools[i]["place_id"] for i in min_order]
+    return jsonify({"route": route})
+
+# ====================================================
+# API ENDPOINTS - MAP VISUALIZATION
+# ====================================================
+
+@app.route("/api/map-schools", methods=["GET"])
+def map_schools():
+    return jsonify(MAP_SCHOOL_CACHE)
+
+@app.route("/api/refresh-map-schools", methods=["POST"])
+def refresh_map_schools():
+    global MAP_SCHOOL_CACHE
+    new_sheet_rows = load_PSA_school_sheet()
+    psa_preschools, happy_feet = split_sheet_schools(new_sheet_rows)
+
+    happy_feet_geocoded = []
+    for s in happy_feet:
+        lat, lng = geocode_address(s["address"])
+        happy_feet_geocoded.append({
+            "name": s["name"],
+            "address": s["address"],
+            "type": "happyfeet",
+            "lat": lat,
+            "lng": lng
+        })
+        time.sleep(0.1)  # 100ms delay
+
+    psa_preschools_geocoded = []
+    for s in psa_preschools:
+        lat, lng = geocode_address(s["address"])
+        psa_preschools_geocoded.append({
+            "name": s["name"],
+            "address": s["address"],
+            "type": "psa",
+            "lat": lat,
+            "lng": lng
+        })
+        time.sleep(0.1)  # 100ms delay
+
+    rec_geocoded = []
+    for site in REC_SITES:
+        lat, lng = geocode_address(site["address"])
+        rec_geocoded.append({
+            "name": site["name"],
+            "address": site["address"],
+            "type": "rec",
+            "lat": lat,
+            "lng": lng
+        })
+
+    MAP_SCHOOL_CACHE = {
+        "happyfeet": happy_feet_geocoded,
+        "psa": psa_preschools_geocoded,
+        "rec": rec_geocoded,
+    }
+    return jsonify({"status": "refreshed"})
+
+# ====================================================
+# API ENDPOINTS - TEAM STATS
+# ====================================================
+
+@app.route('/api/team-stats', methods=['GET'])
 @jwt_required()
-def send_followup():
-    """Send a follow-up email"""
+def get_team_stats():
+    """Get all team members with their statistics"""
     try:
-        data = request.get_json()
-        email_id = data.get("email_id")
+        current_user = get_jwt_identity()
         
-        if not email_id:
-            return jsonify({"error": "Email ID required"}), 400
+        # Get all users
+        users = User.query.all()  # Use SQLAlchemy ORM instead of raw SQL
         
-        user_id = get_jwt_identity()
-        user = User.query.get(user_id)
+        team_stats = []
         
-        if not user:
-            return jsonify({"error": "User not found"}), 404
-        
-        if not user.email_password:
-            return jsonify({"error": "Email settings not configured"}), 400
-        
-        # Get the email record
-        if user.admin:
-            email_record = SentEmail.query.get(email_id)
-        else:
-            email_record = SentEmail.query.filter_by(id=email_id, user_id=user_id).first()
-        
-        if not email_record:
-            return jsonify({"error": "Email record not found"}), 404
-        
-        # Get the school information
-        if user.admin:
-            school = SalesSchool.query.filter_by(email=email_record.school_email).first()
-        else:
-            school = SalesSchool.query.filter_by(
-                email=email_record.school_email, 
-                user_id=user_id
-            ).first()
-        
-        if not school:
-            return jsonify({"error": "School not found"}), 404
-        
-        # Choose follow-up template based on school type
-        if school.school_type == 'preschool':
-            followup_template = PRESCHOOL_FOLLOWUP_TEMPLATE
-        else:
-            followup_template = ELEMENTARY_FOLLOWUP_TEMPLATE
-        
-        # Create follow-up email body
-        body = render_template_string(
-            followup_template,
-            user_name=user.name,
-            user_email=user.email,
-            school_name=school.school_name,
-            contact_name=school.contact_name or "Director/Administrator"
-        )
-        
-        # Send follow-up email
-        success = send_email_with_attachments_rate_limited(
-            from_email=user.email,
-            from_password=user.email_password,
-            to_email=school.email,
-            subject="Follow-up: Let's Connect! PSA Programs",
-            body=body,
-            pdf_files=[],  # No PDFs for follow-up
-            from_name=user.name
-        )
-        
-        if success:
-            # Update sent email record
-            email_record.followup_sent = True
-            db.session.commit()
+        for user in users:
+            # Count schools for this user - use correct table name 'sales_schools'
+            school_count = SalesSchool.query.filter_by(user_id=user.id).count()
             
-            return jsonify({"message": "Follow-up email sent successfully"})
-        else:
-            return jsonify({"error": "Failed to send follow-up email"}), 500
-    
+            # Count emails for this user
+            email_count = SentEmail.query.filter_by(user_id=user.id).count()
+            
+            team_stats.append({
+                'name': user.name,
+                'email': user.email,
+                'phone': user.phone or 'Not provided',
+                'role': 'Administrator' if user.admin else 'Sales Associate',
+                'totalSchools': school_count,
+                'totalEmails': email_count
+            })
+        
+        return jsonify(team_stats)
+        
     except Exception as e:
-        print(f"Error in send_followup: {str(e)}")
-        db.session.rollback()
-        return jsonify({"error": f"Failed to send follow-up email: {str(e)}"}), 500
+        print(f"Error in team-stats: {str(e)}")
+        traceback.print_exc()
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/all-schools', methods=['GET'])
+@jwt_required()
+def get_all_schools():
+    """Get all schools with user information (for fallback team stats)"""
+    try:
+        # Use SQLAlchemy ORM with joins
+        schools = db.session.query(SalesSchool, User).outerjoin(User, SalesSchool.user_id == User.id).all()
+        
+        school_list = []
+        for school, user in schools:
+            school_list.append({
+                'id': school.id,
+                'school_name': school.school_name,
+                'contact_name': school.contact_name,
+                'email': school.email,
+                'phone': school.phone,
+                'address': school.address,
+                'school_type': school.school_type,
+                'status': school.status,
+                'user_id': school.user_id,
+                'user_name': user.name if user else None,
+                'user_email': user.email if user else None,
+                'user_phone': user.phone if user else None
+            })
+        
+        return jsonify(school_list)
+        
+    except Exception as e:
+        print(f"Error in all-schools: {str(e)}")
+        traceback.print_exc()
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/all-emails', methods=['GET'])
+@jwt_required()
+def get_all_emails():
+    """Get all sent emails with user information (for fallback team stats)"""
+    try:
+        # Use SQLAlchemy ORM with joins
+        emails = db.session.query(SentEmail, User).outerjoin(User, SentEmail.user_id == User.id).all()
+        
+        email_list = []
+        for email, user in emails:
+            email_list.append({
+                'id': email.id,
+                'school_name': email.school_name,
+                'school_email': email.school_email,
+                'sent_at': email.sent_at.isoformat() if email.sent_at else None,
+                'responded': email.responded,
+                'followup_sent': email.followup_sent,
+                'user_id': email.user_id,
+                'user_name': user.name if user else None,
+                'user_email': user.email if user else None,
+                'user_phone': user.phone if user else None
+            })
+        
+        return jsonify(email_list)
+        
+    except Exception as e:
+        print(f"Error in all-emails: {str(e)}")
+        traceback.print_exc()
+        return jsonify({'error': str(e)}), 500
 
 # ====================================================
-# ERROR HANDLING
-# ====================================================
-
-@app.errorhandler(404)
-def not_found(error):
-    return jsonify({"error": "Not found"}), 404
-
-@app.errorhandler(500)
-def internal_error(error):
-    return jsonify({"error": "Internal server error"}), 500
-
-# ====================================================
-# APP RUNNER
+# APPLICATION STARTUP
 # ====================================================
 
 if __name__ == "__main__":
-    # For local development, enable CORS for all origins
-    if os.getenv("FLASK_ENV") == "development":
-        CORS(app, supports_credentials=True, origins="*")
-    
-    app.run(host="0.0.0.0", port=int(os.getenv("PORT", 5000)), debug=True)
+    with app.app_context():
+        db.create_all()
+    app.run(debug=True)
 
