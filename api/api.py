@@ -144,6 +144,12 @@ class SentEmail(db.Model):
     responded = db.Column(db.Boolean, default=False)
     followup_sent = db.Column(db.Boolean, default=False)
     user_id = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=False)
+    
+    # For storing reply information
+    reply_content = db.Column(db.Text, nullable=True)  # Store the actual reply text
+    reply_subject = db.Column(db.String, nullable=True)  # Store the reply subject
+    reply_date = db.Column(db.DateTime, nullable=True)  # When they replied
+    reply_sender = db.Column(db.String, nullable=True)  # Who replied (name/email)
 
     user = db.relationship('User', backref=db.backref('sent_emails', lazy=True))
 
@@ -319,7 +325,7 @@ def check_email_replies():
             traceback.print_exc()
 
 def check_user_email_replies(user):
-    """Check email replies for a specific user - focused on 'Re:' subjects only"""
+    """Check email replies for a specific user and store reply content"""
     try:
         print(f"DEBUG: Starting email check for {user.email}")
         
@@ -367,72 +373,85 @@ def check_user_email_replies(user):
             # Check each "Re:" email
             for email_id in email_ids:
                 try:
-                    status, msg_data = mail.fetch(email_id, "(RFC822)")
+                    # Fetch the email
+                    status, msg_data = mail.fetch(email_id, '(RFC822)')
+                    
                     if status == "OK":
-                        email_body = msg_data[0][1]
-                        email_message = email.message_from_bytes(email_body)
+                        # Parse the email
+                        email_message = email.message_from_bytes(msg_data[0][1])
                         
-                        # Get sender email and subject
-                        sender = email_message.get("From", "")
-                        sender_email = extract_email_from_string(sender).lower()
-                        subject = email_message.get("Subject", "")
-                        email_date = email_message.get("Date", "")
+                        # Get sender email address
+                        from_address = email_message.get('From', '')
+                        sender_email = extract_email_from_string(from_address).lower()
                         
-                        print(f"DEBUG: Checking Re: email from {sender_email}")
-                        print(f"DEBUG: Subject: '{subject}'")
-                        print(f"DEBUG: Date: {email_date}")
+                        # Get subject and reply date
+                        subject = email_message.get('Subject', '')
+                        reply_date_str = email_message.get('Date', '')
                         
-                        # Check if this email is from a school we sent to
-                        if sender_email in school_emails:
-                            sent_email = school_emails[sender_email]
-                            
-                            print(f"DEBUG: Found email from watched school: {sender_email}")
-                            
-                            # Validate the email date is after we sent our original email
+                        # Parse reply date
+                        reply_date = None
+                        if reply_date_str:
                             try:
-                                from email.utils import parsedate_to_datetime
-                                received_date = parsedate_to_datetime(email_date)
-                                
-                                # Compare dates (both should be timezone-aware or both naive)
-                                sent_at = sent_email.sent_at
-                                if sent_at.tzinfo is None and received_date.tzinfo is not None:
-                                    # Make sent_at timezone-aware to match received_date
-                                    sent_at = pytz.UTC.localize(sent_at)
-                                elif sent_at.tzinfo is not None and received_date.tzinfo is None:
-                                    # Make received_date timezone-aware to match sent_at
-                                    received_date = pytz.UTC.localize(received_date)
-                                
-                                if received_date <= sent_at:
-                                    print(f"DEBUG: Reply date {received_date} is before/equal to sent date {sent_at}, skipping")
-                                    continue
-                                    
-                                print(f"DEBUG: Date validation passed: received {received_date} > sent {sent_at}")
-                                
-                            except Exception as date_error:
-                                print(f"DEBUG: Date parsing failed: {date_error}")
-                                # If we can't parse dates, still proceed if it's a "Re:" email
-                                print(f"DEBUG: Proceeding anyway since subject contains 'Re:'")
+                                # Parse email date format
+                                reply_date = email.utils.parsedate_to_datetime(reply_date_str)
+                                # Convert to UTC if timezone aware
+                                if reply_date.tzinfo:
+                                    reply_date = reply_date.astimezone(timezone.utc).replace(tzinfo=None)
+                            except Exception as e:
+                                print(f"DEBUG: Could not parse date '{reply_date_str}': {e}")
+                                reply_date = datetime.utcnow()
+                        
+                        print(f"DEBUG: Checking reply from {sender_email} with subject '{subject}'")
+                        
+                        # Extract email body
+                        body_content = ""
+                        if email_message.is_multipart():
+                            for part in email_message.walk():
+                                if part.get_content_type() == "text/plain":
+                                    try:
+                                        body_content = part.get_payload(decode=True).decode('utf-8', errors='ignore')
+                                        break
+                                    except Exception as e:
+                                        print(f"DEBUG: Error decoding email part: {e}")
+                        else:
+                            try:
+                                body_content = email_message.get_payload(decode=True).decode('utf-8', errors='ignore')
+                            except Exception as e:
+                                print(f"DEBUG: Error decoding email body: {e}")
+                        
+                        # Clean up body content (remove excessive line breaks, etc.)
+                        if body_content:
+                            # Remove excessive whitespace but preserve structure
+                            body_content = re.sub(r'\n\s*\n\s*\n', '\n\n', body_content)
+                            body_content = body_content.strip()
+                            # Limit length to prevent database issues
+                            if len(body_content) > 10000:
+                                body_content = body_content[:10000] + "\n\n[Content truncated...]"
+                        
+                        # Check if this is a reply to one of our sent emails
+                        if sender_email in school_emails:
+                            sent_email_record = school_emails[sender_email]
+                            print(f"DEBUG: ✅ Found reply from {sent_email_record.school_name}!")
                             
-                            # Since we already filtered for "Re:" in the search, this is a reply
-                            print(f"DEBUG: ✅ CONFIRMED REPLY from {sender_email}")
-                            print(f"DEBUG: Reply subject: '{subject}'")
+                            # Update the sent email record with reply information
+                            sent_email_record.responded = True
+                            sent_email_record.reply_content = body_content
+                            sent_email_record.reply_subject = subject
+                            sent_email_record.reply_date = reply_date or datetime.utcnow()
+                            sent_email_record.reply_sender = from_address
                             
-                            # Mark as responded
-                            sent_email.responded = True
                             replies_found += 1
                             
-                            print(f"DEBUG: Marked email to {sent_email.school_name} as responded")
-                            
-                        else:
-                            print(f"DEBUG: Re: email from {sender_email} is not from a school we're watching")
-                
+                            # Remove from dict so we don't check it again
+                            del school_emails[sender_email]
+                        
                 except Exception as e:
                     print(f"DEBUG: Error processing email {email_id}: {str(e)}")
                     continue
             
             if replies_found > 0:
                 db.session.commit()
-                print(f"DEBUG: ✅ Successfully marked {replies_found} replies")
+                print(f"DEBUG: ✅ Successfully marked {replies_found} replies with content stored")
             else:
                 print(f"DEBUG: ❌ No replies found from watched schools")
         else:
@@ -443,7 +462,6 @@ def check_user_email_replies(user):
         
     except Exception as e:
         print(f"DEBUG: Error connecting to email for {user.email}: {str(e)}")
-        import traceback
         traceback.print_exc()
 
 # ====================================================
@@ -1310,7 +1328,11 @@ def get_sent_emails():
             "sent_at": email.sent_at,
             "responded": email.responded,
             "followup_sent": email.followup_sent,
-            "user_name": email.user.name if hasattr(email, 'user') else None
+            "user_name": email.user.name if hasattr(email, 'user') else None,
+            # NEW FIELDS for reply information
+            "reply_date": email.reply_date,
+            "reply_sender": email.reply_sender,
+            "has_reply_content": bool(email.reply_content)  # Boolean to indicate if reply content exists
         }
         for email in emails
     ])
@@ -1345,6 +1367,39 @@ def delete_sent_email():
         return jsonify({"status": "Email record deleted successfully"})
     except Exception as e:
         return jsonify({"error": str(e)}), 500
+
+@app.route("/api/email-reply/<int:email_id>", methods=["GET"])
+@jwt_required()
+def get_email_reply(email_id):
+    """Get the reply content for a specific email"""
+    user_id = get_jwt_identity()
+    user = User.query.get(user_id)
+    
+    if not user:
+        return jsonify({"error": "User not found"}), 404
+    
+    # Find the email record - admins can view any, users only their own
+    if user.admin:
+        email_record = SentEmail.query.get(email_id)
+    else:
+        email_record = SentEmail.query.filter_by(id=email_id, user_id=user_id).first()
+    
+    if not email_record:
+        return jsonify({"error": "Email record not found"}), 404
+    
+    if not email_record.responded or not email_record.reply_content:
+        return jsonify({"error": "No reply found for this email"}), 404
+    
+    return jsonify({
+        "id": email_record.id,
+        "school_name": email_record.school_name,
+        "school_email": email_record.school_email,
+        "sent_at": email_record.sent_at,
+        "reply_content": email_record.reply_content,
+        "reply_subject": email_record.reply_subject,
+        "reply_date": email_record.reply_date,
+        "reply_sender": email_record.reply_sender
+    })
 
 # ====================================================
 # API ENDPOINTS - SCHOOL FINDER
