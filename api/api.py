@@ -15,7 +15,7 @@ import atexit
 import logging
 from itertools import permutations
 from math import radians, cos, sin, sqrt, atan2
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 import traceback
 import gspread
 import csv
@@ -25,6 +25,7 @@ from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from email.mime.base import MIMEBase
 from email import encoders
+import email.utils
 import smtplib
 
 # Flask & Extensions
@@ -61,11 +62,19 @@ GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
 app = Flask(__name__)
 
 # CORS Configuration
-CORS(app, supports_credentials=True, origins=[
-    "https://psasales-6l22ucils-david-darrs-projects.vercel.app",
-    "https://www.salespsa.com",
-    "https://salespsa.com"
-])
+CORS(app, 
+     supports_credentials=True, 
+     origins=[
+         "https://psasales-6l22ucils-david-darrs-projects.vercel.app",
+         "https://www.salespsa.com",
+         "https://salespsa.com",
+         "https://psa-sales-backend.onrender.com",
+         "http://localhost:3000",
+         "http://localhost:5173"
+     ],
+     allow_headers=["Content-Type", "Authorization"],
+     methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"]
+)
 
 # Database Configuration
 app.config['SQLALCHEMY_DATABASE_URI'] = (
