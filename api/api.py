@@ -154,13 +154,33 @@ class SentEmail(db.Model):
     followup_sent = db.Column(db.Boolean, default=False)
     user_id = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=False)
     
+    # Keep old fields for backward compatibility
+    reply_content = db.Column(db.Text, nullable=True)
+    reply_subject = db.Column(db.String, nullable=True) 
+    reply_date = db.Column(db.DateTime, nullable=True)
+    reply_sender = db.Column(db.String, nullable=True)
+    
+    # New fields for multiple replies
+    reply_count = db.Column(db.Integer, default=0)
+    last_reply_date = db.Column(db.DateTime, nullable=True)
+    
     # For storing reply information
-    reply_content = db.Column(db.Text, nullable=True)  # Store the actual reply text
-    reply_subject = db.Column(db.String, nullable=True)  # Store the reply subject
-    reply_date = db.Column(db.DateTime, nullable=True)  # When they replied
-    reply_sender = db.Column(db.String, nullable=True)  # Who replied (name/email)
+    replies = db.relationship('EmailReply', backref='sent_email', lazy=True, cascade='all, delete-orphan')
 
-    user = db.relationship('User', backref=db.backref('sent_emails', lazy=True))
+# New model for storing email replies
+class EmailReply(db.Model):
+    __tablename__ = 'email_replies'
+    id = db.Column(db.Integer, primary_key=True)
+    sent_email_id = db.Column(db.Integer, db.ForeignKey('sent_emails.id'), nullable=False)
+    reply_content = db.Column(db.Text, nullable=False)
+    reply_subject = db.Column(db.String, nullable=True)
+    reply_date = db.Column(db.DateTime, nullable=False)
+    reply_sender = db.Column(db.String, nullable=True)
+    reply_message_id = db.Column(db.String, nullable=True)  # To avoid duplicates
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    
+    # Relationship back to the original sent email
+    sent_email = db.relationship('SentEmail', backref=db.backref('replies', lazy=True, cascade='all, delete-orphan'))
 
 # ====================================================
 # GOOGLE SHEETS DATA MANAGEMENT
@@ -469,7 +489,7 @@ def check_user_email_replies(user):
         traceback.print_exc()
 
 def check_user_email_replies_limited(user, max_emails_to_check=20, max_replies_to_process=10):
-    """Check email replies for a specific user with limits to prevent timeout"""
+    """Check email replies for a specific user with limits to prevent timeout - supports multiple replies"""
     try:
         print(f"DEBUG: Starting LIMITED email check for {user.email}")
         
@@ -481,11 +501,11 @@ def check_user_email_replies_limited(user, max_emails_to_check=20, max_replies_t
         # Select inbox
         mail.select("inbox")
         
-        # Get emails from the last 3 days only (reduced from 7)
-        since_date = (datetime.utcnow() - timedelta(days=3)).strftime("%d-%b-%Y")
+        # Get emails from the last 7 days (increased from 3 to catch more replies)
+        since_date = (datetime.utcnow() - timedelta(days=7)).strftime("%d-%b-%Y")
         print(f"DEBUG: Searching for emails since {since_date}")
         
-        # Search for emails with "Re:" in subject from the last 3 days
+        # Search for emails with "Re:" in subject from the last 7 days
         status, messages = mail.search(None, f'(SINCE {since_date}) (SUBJECT "Re:")')
         
         if status == "OK":
@@ -496,47 +516,63 @@ def check_user_email_replies_limited(user, max_emails_to_check=20, max_replies_t
             email_ids = email_ids[:max_emails_to_check]
             print(f"DEBUG: Limited to first {len(email_ids)} emails for processing")
             
-            # Get sent emails for this user that haven't been marked as responded
-            # LIMIT: Only get recent unresponded emails to speed up processing
+            # Get ALL sent emails for this user (including already responded ones)
+            # This is the key change - we now check all emails, not just unresponded ones
             sent_emails = SentEmail.query.filter(
-                SentEmail.user_id == user.id, 
-                SentEmail.responded == False,
-                SentEmail.sent_at >= datetime.utcnow() - timedelta(days=30)  # Only last 30 days
-            ).limit(50).all()  # Limit to 50 most recent
+                SentEmail.user_id == user.id,
+                SentEmail.sent_at >= datetime.utcnow() - timedelta(days=60)  # Last 60 days
+            ).all()
             
-            print(f"DEBUG: Found {len(sent_emails)} recent unresponded sent emails")
+            print(f"DEBUG: Found {len(sent_emails)} sent emails (including already responded)")
             
-            # Create a dictionary of school email addresses for quick lookup
+            # Create a dictionary of school email addresses for lookup
             school_emails = {}
             for sent_email in sent_emails:
                 school_emails[sent_email.school_email.lower()] = sent_email
             
             if not school_emails:
-                print("DEBUG: No unresponded emails to check for replies")
+                print("DEBUG: No sent emails to check for replies")
                 mail.close()
                 mail.logout()
                 return 0
             
-            replies_found = 0
+            # Get existing reply message IDs to avoid duplicates
+            existing_message_ids = set()
+            existing_replies = EmailReply.query.join(SentEmail).filter(
+                SentEmail.user_id == user.id,
+                EmailReply.reply_message_id.isnot(None)
+            ).all()
             
-            # Check each "Re:" email with limits
+            for reply in existing_replies:
+                if reply.reply_message_id:
+                    existing_message_ids.add(reply.reply_message_id)
+            
+            print(f"DEBUG: Found {len(existing_message_ids)} existing reply message IDs")
+            
+            new_replies_found = 0
+            
+            # Check each "Re:" email
             for idx, email_id in enumerate(email_ids):
-                # TIMEOUT PROTECTION: Stop if we've found enough replies
-                if replies_found >= max_replies_to_process:
-                    print(f"DEBUG: Reached limit of {max_replies_to_process} replies, stopping")
+                # TIMEOUT PROTECTION
+                if new_replies_found >= max_replies_to_process:
+                    print(f"DEBUG: Reached limit of {max_replies_to_process} new replies, stopping")
                     break
-                    
-                # TIMEOUT PROTECTION: Stop processing after 15 seconds
-                if idx > 0 and idx % 5 == 0:  # Check every 5 emails
-                    print(f"DEBUG: Processed {idx} emails so far, {replies_found} replies found")
                 
                 try:
-                    # Fetch the email with timeout protection
+                    # Fetch the email
                     status, msg_data = mail.fetch(email_id, '(RFC822)')
                     
                     if status == "OK":
                         # Parse the email
                         email_message = email.message_from_bytes(msg_data[0][1])
+                        
+                        # Get message ID to avoid duplicates
+                        message_id = email_message.get('Message-ID', '')
+                        
+                        # Skip if we've already processed this exact message
+                        if message_id and message_id in existing_message_ids:
+                            print(f"DEBUG: Skipping duplicate message ID: {message_id}")
+                            continue
                         
                         # Get sender email address
                         from_address = email_message.get('From', '')
@@ -544,11 +580,11 @@ def check_user_email_replies_limited(user, max_emails_to_check=20, max_replies_t
                         
                         # Quick check if this sender is in our watch list
                         if sender_email not in school_emails:
-                            continue  # Skip if not from a school we emailed
+                            continue
                         
                         print(f"DEBUG: ✅ MATCH FOUND! Processing reply from {sender_email}")
                         
-                        # Get subject and reply date
+                        # Get email details
                         subject = email_message.get('Subject', '')
                         reply_date_str = email_message.get('Date', '')
                         
@@ -563,7 +599,7 @@ def check_user_email_replies_limited(user, max_emails_to_check=20, max_replies_t
                                 print(f"DEBUG: Could not parse date '{reply_date_str}': {e}")
                                 reply_date = datetime.utcnow()
                         
-                        # Extract email body (simplified to save time)
+                        # Extract email body
                         body_content = ""
                         if email_message.is_multipart():
                             for part in email_message.walk():
@@ -583,23 +619,42 @@ def check_user_email_replies_limited(user, max_emails_to_check=20, max_replies_t
                         if body_content:
                             body_content = re.sub(r'\n\s*\n\s*\n', '\n\n', body_content)
                             body_content = body_content.strip()
-                            # Limit length to prevent database issues
-                            if len(body_content) > 5000:  # Reduced from 10000
-                                body_content = body_content[:5000] + "\n\n[Content truncated...]"
+                            if len(body_content) > 8000:
+                                body_content = body_content[:8000] + "\n\n[Content truncated...]"
+                        
+                        # Get the sent email record
+                        sent_email_record = school_emails[sender_email]
+                        
+                        # Create new reply record
+                        new_reply = EmailReply(
+                            sent_email_id=sent_email_record.id,
+                            reply_content=body_content,
+                            reply_subject=subject,
+                            reply_date=reply_date or datetime.utcnow(),
+                            reply_sender=from_address,
+                            reply_message_id=message_id
+                        )
+                        
+                        db.session.add(new_reply)
                         
                         # Update the sent email record
-                        sent_email_record = school_emails[sender_email]
                         sent_email_record.responded = True
-                        sent_email_record.reply_content = body_content
-                        sent_email_record.reply_subject = subject
-                        sent_email_record.reply_date = reply_date or datetime.utcnow()
-                        sent_email_record.reply_sender = from_address
+                        sent_email_record.reply_count = (sent_email_record.reply_count or 0) + 1
+                        sent_email_record.last_reply_date = reply_date or datetime.utcnow()
                         
-                        replies_found += 1
-                        print(f"DEBUG: ✅ Reply #{replies_found} processed from {sent_email_record.school_name}")
+                        # Keep the first reply in the old fields for backward compatibility
+                        if sent_email_record.reply_count == 1:
+                            sent_email_record.reply_content = body_content
+                            sent_email_record.reply_subject = subject
+                            sent_email_record.reply_date = reply_date or datetime.utcnow()
+                            sent_email_record.reply_sender = from_address
                         
-                        # Remove from dict to avoid reprocessing
-                        del school_emails[sender_email]
+                        new_replies_found += 1
+                        print(f"DEBUG: ✅ Reply #{new_replies_found} processed from {sent_email_record.school_name} (Total replies: {sent_email_record.reply_count})")
+                        
+                        # Add to existing message IDs to avoid processing duplicates in this session
+                        if message_id:
+                            existing_message_ids.add(message_id)
                         
                         # COMMIT IMMEDIATELY to avoid losing progress
                         try:
@@ -612,13 +667,13 @@ def check_user_email_replies_limited(user, max_emails_to_check=20, max_replies_t
                     print(f"DEBUG: Error processing email {email_id}: {str(e)}")
                     continue
             
-            print(f"DEBUG: ✅ Successfully processed {replies_found} replies")
+            print(f"DEBUG: ✅ Successfully processed {new_replies_found} new replies")
         else:
             print(f"DEBUG: Email search failed with status: {status}")
         
         mail.close()
         mail.logout()
-        return replies_found
+        return new_replies_found
         
     except Exception as e:
         print(f"DEBUG: Error in limited email check for {user.email}: {str(e)}")
@@ -1506,10 +1561,12 @@ def get_sent_emails():
             "responded": email.responded,
             "followup_sent": email.followup_sent,
             "user_name": email.user.name if hasattr(email, 'user') else None,
-            # NEW FIELDS for reply information
-            "reply_date": email.reply_date,
+            # Updated reply information
+            "reply_count": email.reply_count or 0,
+            "last_reply_date": email.last_reply_date,
+            "reply_date": email.reply_date,  # Keep for backward compatibility
             "reply_sender": email.reply_sender,
-            "has_reply_content": bool(email.reply_content)  # Boolean to indicate if reply content exists
+            "has_reply_content": bool(email.reply_content or (email.reply_count and email.reply_count > 0))
         }
         for email in emails
     ])
@@ -1576,6 +1633,48 @@ def get_email_reply(email_id):
         "reply_subject": email_record.reply_subject,
         "reply_date": email_record.reply_date,
         "reply_sender": email_record.reply_sender
+    })
+
+@app.route("/api/email-reply-chain/<int:email_id>", methods=["GET"])
+@jwt_required()
+def get_email_reply_chain(email_id):
+    """Get all replies for a specific email (conversation chain)"""
+    user_id = get_jwt_identity()
+    user = User.query.get(user_id)
+    
+    if not user:
+        return jsonify({"error": "User not found"}), 404
+    
+    # Find the email record - admins can view any, users only their own
+    if user.admin:
+        email_record = SentEmail.query.get(email_id)
+    else:
+        email_record = SentEmail.query.filter_by(id=email_id, user_id=user_id).first()
+    
+    if not email_record:
+        return jsonify({"error": "Email record not found"}), 404
+    
+    # Get all replies for this email, ordered by date
+    replies = EmailReply.query.filter_by(sent_email_id=email_id).order_by(EmailReply.reply_date.asc()).all()
+    
+    return jsonify({
+        "id": email_record.id,
+        "school_name": email_record.school_name,
+        "school_email": email_record.school_email,
+        "sent_at": email_record.sent_at,
+        "reply_count": len(replies),
+        "last_reply_date": email_record.last_reply_date,
+        "replies": [
+            {
+                "id": reply.id,
+                "reply_content": reply.reply_content,
+                "reply_subject": reply.reply_subject,
+                "reply_date": reply.reply_date,
+                "reply_sender": reply.reply_sender,
+                "created_at": reply.created_at
+            }
+            for reply in replies
+        ]
     })
 
 # ====================================================
