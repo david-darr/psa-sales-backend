@@ -811,6 +811,37 @@ Sales Associate and Coach
 https://thepsasports.com
 """
 
+# Add this new template with the other email templates
+PRIVATE_SCHOOL_EMAIL_TEMPLATE = """
+Hi {{ contact_name }},
+
+My name is Coach {{ user_name }}, and I'm with The Players Sports Academy (PSA) — a nationally recognized nonprofit specializing in after-school athletic enrichment for elementary students. I have attached our flyer as well as some recommendation letters to this email to review at your convenience.
+
+We partner with dozens of diocese schools across Northern Virginia to provide fun, convenient, and high-quality sports programs right on school grounds.
+
+Here's why schools and families love working with PSA:
+
+No cost to the school – Parents enroll directly, and we offer a revenue-share model to support your PTA or school initiatives.
+
+Hassle-free – We handle everything: professional coaches, equipment, registration, and student pick-up after each session.
+
+Flexible offerings – Programs run seasonally (6–8 weeks) with options like soccer, basketball, flag football, and more.
+
+Community-focused – We provide scholarships and fundraising support to help all students participate.
+
+We currently run successful programs at St. Theresa, St. Veronica, St. Agnes, and over a dozen more diocese schools. Would love to bring the same energy and opportunity to your school!
+
+Would you be open to a quick call to discuss? Feel free to let me know a time that works for you. Be sure to check out those recommendation letters from within the diocese I attached for you.
+
+Thank you for your time, and I look forward to the opportunity to work together!
+
+Best regards,
+{{ user_name }}
+Sales Associate and Coach
+{{ user_email }}
+www.thepsasports.com
+"""
+
 # Follow up
 PRESCHOOL_FOLLOWUP_TEMPLATE = """
 Hello there,
@@ -846,6 +877,25 @@ Best regards,
 Sales Associate and Coach  
 {{ user_email }}
 https://thepsasports.com
+"""
+
+# Add private school follow-up template
+PRIVATE_SCHOOL_FOLLOWUP_TEMPLATE = """
+Hello there,
+
+I wanted to follow up on my previous email regarding PSA's after-school sports programs for {{ school_name }}.
+
+Our programs have been incredibly successful at diocese schools throughout Northern Virginia, providing students with quality athletic instruction while supporting school fundraising initiatives.
+
+I'd be happy to discuss how we can customize a program to fit your school's specific needs and schedule.
+
+Please let me know if you have any questions or would like to schedule a brief conversation.
+
+Best regards,  
+{{ user_name }}  
+Sales Associate and Coach  
+{{ user_email }}
+www.thepsasports.com
 """
 
 # ====================================================
@@ -987,14 +1037,14 @@ def add_school():
     contact_name = data.get("contact_name")
     phone = data.get("phone")
     address = data.get("address")
-    school_type = data.get("school_type", "preschool")  # NEW FIELD
+    school_type = data.get("school_type", "preschool")
     
     if not all([school_name, email]):
-        return jsonify({"error": "School name and email required"}), 400
+        return jsonify({"error": "School name and email are required"}), 400
     
-    # Validate school type
-    if school_type not in ['preschool', 'elementary']:
-        return jsonify({"error": "School type must be 'preschool' or 'elementary'"}), 400
+    # Update validation to include private school
+    if school_type not in ['preschool', 'elementary', 'private']:
+        return jsonify({"error": "Invalid school type"}), 400
     
     user_id = get_jwt_identity()
     
@@ -1307,22 +1357,16 @@ def send_email():
         try:
             print(f"DEBUG: Processing school: {school.school_name}")
             
-            # Choose template, subject, and PDFs based on school type
+            # Determine email template and PDF files based on school type
             if school.school_type == 'preschool':
                 email_template = PRESCHOOL_EMAIL_TEMPLATE
-                email_subject = f"Fun Sports Programs for {school.school_name} Preschoolers!"
-                pdf_files = [
-                    "PSA TOTS year round flyer.pdf",
-                    "PSA TOTS seasonal flyer.pdf", 
-                    "PSA TOTS Recommendation (Primrose School).pdf"
-                ]
+                pdf_files = ["PSA TOTS seasonal flyer.pdf", "PSA TOTS year round flyer.pdf", "PSA TOTS Recommendation (Primrose School).pdf"]
+            elif school.school_type == 'private':
+                email_template = PRIVATE_SCHOOL_EMAIL_TEMPLATE
+                pdf_files = ["PSA After School.pdf"]  
             else:  # elementary
                 email_template = ELEMENTARY_EMAIL_TEMPLATE
-                email_subject = f"Sports Programs for {school.school_name} Students"
-                pdf_files = [
-                    "PSA After School.pdf",
-                    "PSA Recommendation Letter (Madison Trust ES).pdf"
-                ]
+                pdf_files = ["PSA After School.pdf", "PSA Recommendation Letter (Madison Trust ES).pdf"]
             
             # Create email body
             body = render_template_string(
@@ -1338,7 +1382,7 @@ def send_email():
                 from_email=user.email,
                 from_password=user.email_password,
                 to_email=school.email,
-                subject=email_subject,
+                subject=subject,
                 body=body,
                 pdf_files=pdf_files,
                 from_name=user.name
@@ -1483,7 +1527,9 @@ def send_followup():
     # Choose followup template based on school type
     if school and school.school_type == 'preschool':
         followup_template = PRESCHOOL_FOLLOWUP_TEMPLATE
-    else:
+    elif school and school.school_type == 'private':
+        followup_template = PRIVATE_SCHOOL_FOLLOWUP_TEMPLATE
+    else:  # elementary
         followup_template = ELEMENTARY_FOLLOWUP_TEMPLATE
 
     # Send follow-up email
@@ -1965,6 +2011,7 @@ def send_custom_reply():
     """Send a custom reply to a school"""
     data = request.get_json()
     email_id = data.get("email_id")
+   
     to_email = data.get("to_email")
     subject = data.get("subject")
     message = data.get("message")
