@@ -1956,6 +1956,59 @@ def get_all_emails():
         return jsonify({'error': str(e)}), 500
 
 # ====================================================
+# API ENDPOINTS - CUSTOM REPLIES
+# ====================================================
+
+@app.route("/api/send-custom-reply", methods=["POST"])
+@jwt_required()
+def send_custom_reply():
+    """Send a custom reply to a school"""
+    data = request.get_json()
+    email_id = data.get("email_id")
+    to_email = data.get("to_email")
+    subject = data.get("subject")
+    message = data.get("message")
+    
+    if not all([email_id, to_email, subject, message]):
+        return jsonify({"error": "Missing required fields"}), 400
+
+    user_id = get_jwt_identity()
+    user = User.query.get(user_id)
+    
+    if not user or not user.email_password:
+        return jsonify({"error": "User or email settings not configured"}), 400
+
+    # Verify user owns this email or is admin
+    if user.admin:
+        email_record = SentEmail.query.get(email_id)
+    else:
+        email_record = SentEmail.query.filter_by(id=email_id, user_id=user_id).first()
+    
+    if not email_record:
+        return jsonify({"error": "Email record not found"}), 404
+
+    try:
+        # Send the custom reply
+        success = send_email_with_attachments(
+            from_email=user.email,
+            from_password=user.email_password,
+            to_email=to_email,
+            subject=subject,
+            body=message,
+            pdf_files=[],  # No attachments for replies
+            from_name=user.name
+        )
+        
+        if success:
+            return jsonify({"status": "Custom reply sent successfully"})
+        else:
+            return jsonify({"error": "Failed to send custom reply"}), 500
+            
+    except Exception as e:
+        print(f"Error sending custom reply: {str(e)}")
+        return jsonify({"error": f"Failed to send custom reply: {str(e)}"}), 500
+
+# ====================================================
 # APPLICATION STARTUP
 # ====================================================
 
