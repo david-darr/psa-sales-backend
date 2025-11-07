@@ -164,9 +164,6 @@ class SentEmail(db.Model):
     reply_count = db.Column(db.Integer, default=0)
     last_reply_date = db.Column(db.DateTime, nullable=True)
     
-    # For storing reply information
-    replies = db.relationship('EmailReply', backref='sent_email', lazy=True, cascade='all, delete-orphan')
-
 # New model for storing email replies
 class EmailReply(db.Model):
     __tablename__ = 'email_replies'
@@ -179,7 +176,7 @@ class EmailReply(db.Model):
     reply_message_id = db.Column(db.String, nullable=True)  # To avoid duplicates
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
     
-    # Relationship back to the original sent email
+    # KEEP ONLY THIS RELATIONSHIP DEFINITION
     sent_email = db.relationship('SentEmail', backref=db.backref('replies', lazy=True, cascade='all, delete-orphan'))
 
 # ====================================================
