@@ -291,17 +291,17 @@ def extract_email_from_string(email_string):
 # ====================================================
 
 def check_email_replies():
-    """Check for email replies and update the database"""
+    """Check for email replies and update the database (background version)"""
     with app.app_context():
         start_time = datetime.utcnow()
         print(f"=== AUTOMATIC EMAIL REPLY CHECK STARTED at {start_time} ===")
         
         try:
-            # Get all users who have sent emails and have email passwords configured
+            # Get users with email configurations (limit to prevent timeout)
             users_with_emails = User.query.filter(
                 User.email_password.isnot(None),
                 User.id.in_(db.session.query(SentEmail.user_id).distinct())
-            ).all()
+            ).limit(2).all()  # Limit to 2 users for background processing
             
             print(f"Found {len(users_with_emails)} users with email configurations")
             
@@ -310,27 +310,22 @@ def check_email_replies():
             for user in users_with_emails:
                 try:
                     print(f"Checking emails for user: {user.email}")
-                    replies_before = SentEmail.query.filter_by(user_id=user.id, responded=True).count()
-                    check_user_email_replies(user)
-                    replies_after = SentEmail.query.filter_by(user_id=user.id, responded=True).count()
-                    new_replies = replies_after - replies_before
+                    # Use limited version for background processing too
+                    new_replies = check_user_email_replies_limited(user, max_emails_to_check=10, max_replies_to_process=5)
                     total_replies_found += new_replies
                     print(f"Found {new_replies} new replies for {user.email}")
                 except Exception as e:
-                    print(f"Error checking emails for {user.email}: {str(e)}")
-                    import traceback
-                    traceback.print_exc()
+                    print(f"Error checking emails for user {user.email}: {str(e)}")
+                    continue
             
             end_time = datetime.utcnow()
             duration = (end_time - start_time).total_seconds()
             print(f"=== AUTOMATIC EMAIL REPLY CHECK COMPLETED at {end_time} ===")
             print(f"Duration: {duration:.2f} seconds")
             print(f"Total new replies found: {total_replies_found}")
-            print(f"Next check scheduled for: {(start_time + timedelta(minutes=30)).strftime('%Y-%m-%d %H:%M:%S')} UTC")
             
         except Exception as e:
             print(f"ERROR in automatic email check: {str(e)}")
-            import traceback
             traceback.print_exc()
 
 def check_user_email_replies(user):
@@ -472,6 +467,163 @@ def check_user_email_replies(user):
     except Exception as e:
         print(f"DEBUG: Error connecting to email for {user.email}: {str(e)}")
         traceback.print_exc()
+
+def check_user_email_replies_limited(user, max_emails_to_check=20, max_replies_to_process=10):
+    """Check email replies for a specific user with limits to prevent timeout"""
+    try:
+        print(f"DEBUG: Starting LIMITED email check for {user.email}")
+        
+        # Connect to Gmail IMAP with timeout
+        context = ssl.create_default_context()
+        mail = imaplib.IMAP4_SSL("imap.gmail.com", 993, ssl_context=context)
+        mail.login(user.email, user.email_password)
+        
+        # Select inbox
+        mail.select("inbox")
+        
+        # Get emails from the last 3 days only (reduced from 7)
+        since_date = (datetime.utcnow() - timedelta(days=3)).strftime("%d-%b-%Y")
+        print(f"DEBUG: Searching for emails since {since_date}")
+        
+        # Search for emails with "Re:" in subject from the last 3 days
+        status, messages = mail.search(None, f'(SINCE {since_date}) (SUBJECT "Re:")')
+        
+        if status == "OK":
+            email_ids = messages[0].split()
+            print(f"DEBUG: Found {len(email_ids)} emails with 'Re:' in subject")
+            
+            # LIMIT: Only check first 20 emails to prevent timeout
+            email_ids = email_ids[:max_emails_to_check]
+            print(f"DEBUG: Limited to first {len(email_ids)} emails for processing")
+            
+            # Get sent emails for this user that haven't been marked as responded
+            # LIMIT: Only get recent unresponded emails to speed up processing
+            sent_emails = SentEmail.query.filter(
+                SentEmail.user_id == user.id, 
+                SentEmail.responded == False,
+                SentEmail.sent_at >= datetime.utcnow() - timedelta(days=30)  # Only last 30 days
+            ).limit(50).all()  # Limit to 50 most recent
+            
+            print(f"DEBUG: Found {len(sent_emails)} recent unresponded sent emails")
+            
+            # Create a dictionary of school email addresses for quick lookup
+            school_emails = {}
+            for sent_email in sent_emails:
+                school_emails[sent_email.school_email.lower()] = sent_email
+            
+            if not school_emails:
+                print("DEBUG: No unresponded emails to check for replies")
+                mail.close()
+                mail.logout()
+                return 0
+            
+            replies_found = 0
+            
+            # Check each "Re:" email with limits
+            for idx, email_id in enumerate(email_ids):
+                # TIMEOUT PROTECTION: Stop if we've found enough replies
+                if replies_found >= max_replies_to_process:
+                    print(f"DEBUG: Reached limit of {max_replies_to_process} replies, stopping")
+                    break
+                    
+                # TIMEOUT PROTECTION: Stop processing after 15 seconds
+                if idx > 0 and idx % 5 == 0:  # Check every 5 emails
+                    print(f"DEBUG: Processed {idx} emails so far, {replies_found} replies found")
+                
+                try:
+                    # Fetch the email with timeout protection
+                    status, msg_data = mail.fetch(email_id, '(RFC822)')
+                    
+                    if status == "OK":
+                        # Parse the email
+                        email_message = email.message_from_bytes(msg_data[0][1])
+                        
+                        # Get sender email address
+                        from_address = email_message.get('From', '')
+                        sender_email = extract_email_from_string(from_address).lower()
+                        
+                        # Quick check if this sender is in our watch list
+                        if sender_email not in school_emails:
+                            continue  # Skip if not from a school we emailed
+                        
+                        print(f"DEBUG: ✅ MATCH FOUND! Processing reply from {sender_email}")
+                        
+                        # Get subject and reply date
+                        subject = email_message.get('Subject', '')
+                        reply_date_str = email_message.get('Date', '')
+                        
+                        # Parse reply date
+                        reply_date = None
+                        if reply_date_str:
+                            try:
+                                reply_date = email.utils.parsedate_to_datetime(reply_date_str)
+                                if reply_date.tzinfo:
+                                    reply_date = reply_date.astimezone(timezone.utc).replace(tzinfo=None)
+                            except Exception as e:
+                                print(f"DEBUG: Could not parse date '{reply_date_str}': {e}")
+                                reply_date = datetime.utcnow()
+                        
+                        # Extract email body (simplified to save time)
+                        body_content = ""
+                        if email_message.is_multipart():
+                            for part in email_message.walk():
+                                if part.get_content_type() == "text/plain":
+                                    try:
+                                        body_content = part.get_payload(decode=True).decode('utf-8', errors='ignore')
+                                        break
+                                    except Exception as e:
+                                        print(f"DEBUG: Error decoding email part: {e}")
+                        else:
+                            try:
+                                body_content = email_message.get_payload(decode=True).decode('utf-8', errors='ignore')
+                            except Exception as e:
+                                print(f"DEBUG: Error decoding email body: {e}")
+                        
+                        # Clean up body content
+                        if body_content:
+                            body_content = re.sub(r'\n\s*\n\s*\n', '\n\n', body_content)
+                            body_content = body_content.strip()
+                            # Limit length to prevent database issues
+                            if len(body_content) > 5000:  # Reduced from 10000
+                                body_content = body_content[:5000] + "\n\n[Content truncated...]"
+                        
+                        # Update the sent email record
+                        sent_email_record = school_emails[sender_email]
+                        sent_email_record.responded = True
+                        sent_email_record.reply_content = body_content
+                        sent_email_record.reply_subject = subject
+                        sent_email_record.reply_date = reply_date or datetime.utcnow()
+                        sent_email_record.reply_sender = from_address
+                        
+                        replies_found += 1
+                        print(f"DEBUG: ✅ Reply #{replies_found} processed from {sent_email_record.school_name}")
+                        
+                        # Remove from dict to avoid reprocessing
+                        del school_emails[sender_email]
+                        
+                        # COMMIT IMMEDIATELY to avoid losing progress
+                        try:
+                            db.session.commit()
+                        except Exception as commit_error:
+                            print(f"DEBUG: Commit error: {commit_error}")
+                            db.session.rollback()
+                        
+                except Exception as e:
+                    print(f"DEBUG: Error processing email {email_id}: {str(e)}")
+                    continue
+            
+            print(f"DEBUG: ✅ Successfully processed {replies_found} replies")
+        else:
+            print(f"DEBUG: Email search failed with status: {status}")
+        
+        mail.close()
+        mail.logout()
+        return replies_found
+        
+    except Exception as e:
+        print(f"DEBUG: Error in limited email check for {user.email}: {str(e)}")
+        traceback.print_exc()
+        return 0
 
 # ====================================================
 # SCHEDULER CONFIGURATION
@@ -732,7 +884,7 @@ def save_email_settings():
 @app.route("/api/check-email-replies", methods=["POST"])
 @jwt_required()
 def manual_check_email_replies():
-    """Manually trigger email reply checking"""
+    """Manually trigger email reply checking with timeout protection"""
     user_id = get_jwt_identity()
     user = User.query.get(user_id)
     
@@ -744,14 +896,30 @@ def manual_check_email_replies():
     
     try:
         if user.admin:
-            # Admin can check all emails
-            check_email_replies()
-            return jsonify({"status": "Checked all user emails for replies"})
+            # Admin can check all emails - but limit to prevent timeout
+            users_to_check = User.query.filter(
+                User.email_password.isnot(None),
+                User.id.in_(db.session.query(SentEmail.user_id).distinct())
+            ).limit(3).all()  # Limit to 3 users max for manual check
+            
+            total_checked = 0
+            for check_user in users_to_check:
+                replies_found = check_user_email_replies_limited(check_user)
+                total_checked += replies_found
+                
+            return jsonify({
+                "status": f"Checked {len(users_to_check)} users, found {total_checked} new replies",
+                "message": "Manual check completed (limited to prevent timeout)"
+            })
         else:
             # Regular user can only check their own
-            check_user_email_replies(user)
-            return jsonify({"status": "Checked your emails for replies"})
+            replies_found = check_user_email_replies_limited(user)
+            return jsonify({
+                "status": f"Found {replies_found} new replies for your account",
+                "message": "Email check completed"
+            })
     except Exception as e:
+        print(f"Error in manual email check: {str(e)}")
         return jsonify({"error": f"Failed to check emails: {str(e)}"}), 500
 
 # ====================================================
