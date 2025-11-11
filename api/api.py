@@ -1351,7 +1351,7 @@ def send_email():
     # **KEY FIX**: Process only first 5 schools if more than 5 selected
     if len(schools) > 5:
         schools = schools[:5]  # Limit to 5 emails per request
-        print(f"DEBUG: Limited to first 5 schools to avoid timeout")
+        print(f"DEBUG: Limited to 5 schools to avoid timeout")
 
     for school in schools:
         try:
@@ -1532,7 +1532,7 @@ def send_followup():
     else:  # elementary
         followup_template = ELEMENTARY_FOLLOWUP_TEMPLATE
 
-    # Send follow-up email
+    # Create follow-up email body
     followup_body = render_template_string(
         followup_template,
         school_name=original_email.school_name,
@@ -1541,24 +1541,27 @@ def send_followup():
     )
 
     try:
-        # Configure Flask-Mail for this user
-        app.config['MAIL_USERNAME'] = user.email
-        app.config['MAIL_PASSWORD'] = user.email_password
-        app.config['MAIL_DEFAULT_SENDER'] = user.email
-        
-        msg = Message(
+        # Use the same send_email_with_attachments function that works for regular emails
+        success = send_email_with_attachments(
+            from_email=user.email,
+            from_password=user.email_password,
+            to_email=original_email.school_email,
             subject="Follow-Up: PSA Programs",
-            recipients=[original_email.school_email],
             body=followup_body,
-            sender=user.email
+            pdf_files=[],  # No attachments for follow-ups
+            from_name=user.name
         )
-        mail.send(msg)
         
-        original_email.followup_sent = True
-        db.session.commit()
-        return jsonify({"status": "follow-up sent"})
+        if success:
+            original_email.followup_sent = True
+            db.session.commit()
+            return jsonify({"status": "follow-up sent"})
+        else:
+            return jsonify({"error": "Failed to send follow-up email"}), 500
+            
     except Exception as e:
-        return jsonify({"error": str(e)}), 500
+        print(f"Error sending follow-up email: {str(e)}")
+        return jsonify({"error": f"Failed to send follow-up: {str(e)}"}), 500
 
 @app.route("/api/mark-responded", methods=["POST"])
 @jwt_required()
