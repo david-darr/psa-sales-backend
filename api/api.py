@@ -1143,197 +1143,201 @@ def get_schools():
 @app.route("/api/upload-schools-csv", methods=["POST"])
 @jwt_required()
 def upload_schools_csv():
-    """Upload schools from CSV file - optimized for large files"""
+    """Upload schools from CSV file - supports multiple emails per school and private schools"""
     try:
         user_id = get_jwt_identity()
-        user = User.query.get(user_id)
         
-        if not user:
-            return jsonify({"error": "User not found"}), 404
-        
-        # Check if file was uploaded
         if 'file' not in request.files:
             return jsonify({"error": "No file uploaded"}), 400
         
         file = request.files['file']
-        
         if file.filename == '':
             return jsonify({"error": "No file selected"}), 400
         
         if not file.filename.lower().endswith('.csv'):
-            return jsonify({"error": "File must be a CSV file"}), 400
+            return jsonify({"error": "File must be a CSV"}), 400
         
-        # Read and parse CSV file
-        stream = io.StringIO(file.stream.read().decode("UTF8"), newline=None)
-        csv_reader = csv.DictReader(stream)
+        # Read CSV content
+        content = file.read().decode('utf-8')
+        csv_reader = csv.DictReader(StringIO(content))
         
         schools_added = 0
         schools_skipped = 0
         errors = []
+        schools_dict = {}  # To group schools by name and collect emails
         
-        # Expected column names (case insensitive)
-        required_columns = ['school_name', 'email']
-        optional_columns = ['contact_name', 'phone', 'address', 'school_type']
+        # Column mapping for flexible CSV formats
+        def find_column(headers, possible_names):
+            headers_lower = [h.lower().strip() for h in headers]
+            for name in possible_names:
+                if name.lower() in headers_lower:
+                    return headers[headers_lower.index(name.lower())]
+            return None
         
-        # Get the first row to check headers
-        try:
-            headers = csv_reader.fieldnames
-            if not headers:
-                return jsonify({"error": "CSV file appears to be empty"}), 400
-            
-            # Normalize headers (lowercase, remove spaces)
-            normalized_headers = {header.lower().replace(' ', '_').replace('-', '_'): header for header in headers}
-            
-            # Check for required columns
-            missing_required = []
-            for required in required_columns:
-                found = False
-                for norm_header in normalized_headers.keys():
-                    if required in norm_header or norm_header in required:
-                        found = True
-                        break
-                if not found:
-                    missing_required.append(required)
-            
-            if missing_required:
-                return jsonify({
-                    "error": f"Missing required columns: {', '.join(missing_required)}. CSV must contain at least school_name and email columns."
-                }), 400
-            
-        except Exception as e:
-            return jsonify({"error": f"Error reading CSV headers: {str(e)}"}), 400
+        headers = csv_reader.fieldnames
+        if not headers:
+            return jsonify({"error": "CSV file appears to be empty or invalid"}), 400
         
-        # OPTIMIZATION: Get all existing schools for this user in one query
-        print(f"Loading existing schools for user {user_id}...")
-        existing_schools = SalesSchool.query.filter_by(user_id=user_id).all()
-        existing_school_names = {school.school_name.lower().strip() for school in existing_schools}
-        print(f"Found {len(existing_school_names)} existing schools")
+        # Map CSV columns to our fields
+        school_name_col = find_column(headers, [
+            'school_name', 'school name', 'name', 'school', 'schoolname'
+        ])
+        email_col = find_column(headers, [
+            'email', 'email_address', 'school_email', 'contact_email', 'e-mail'
+        ])
+        contact_name_col = find_column(headers, [
+            'contact_name', 'contact name', 'contact', 'director', 'principal', 'contactname'
+        ])
+        phone_col = find_column(headers, [
+            'phone', 'phone_number', 'telephone', 'tel', 'phonenumber'
+        ])
+        address_col = find_column(headers, [
+            'address', 'school_address', 'location', 'addr'
+        ])
+        school_type_col = find_column(headers, [
+            'school_type', 'type', 'school type', 'category', 'schooltype'
+        ])
         
-        # OPTIMIZATION: Collect all valid schools first, then bulk insert
-        schools_to_add = []
+        if not school_name_col or not email_col:
+            return jsonify({
+                "error": "CSV must contain 'school_name' and 'email' columns (or similar variations)"
+            }), 400
+        
+        print(f"DEBUG: CSV columns mapped - name: {school_name_col}, email: {email_col}")
+        
+        # First pass: Group schools by name and collect all their emails
         row_count = 0
-        
-        # Process each row
-        for row_num, row in enumerate(csv_reader, start=2):  # Start at 2 because row 1 is headers
+        for row in csv_reader:
             row_count += 1
             
-            # Progress logging for large files
-            if row_count % 50 == 0:
-                print(f"Processing row {row_count}...")
-            
             try:
-                # Extract data with flexible column matching
-                school_data = {}
-                
-                # Map CSV columns to our fields
-                for field in required_columns + optional_columns:
-                    value = None
-                    
-                    # Try to find matching column
-                    for csv_col, csv_val in row.items():
-                        csv_col_norm = csv_col.lower().replace(' ', '_').replace('-', '_')
-                        if field in csv_col_norm or csv_col_norm in field:
-                            value = csv_val.strip() if csv_val else None
-                            break
-                    
-                    school_data[field] = value
+                school_name = row.get(school_name_col, '').strip()
+                email = row.get(email_col, '').strip()
+                contact_name = row.get(contact_name_col, '').strip() if contact_name_col else ''
+                phone = row.get(phone_col, '').strip() if phone_col else ''
+                address = row.get(address_col, '').strip() if address_col else ''
+                school_type = row.get(school_type_col, '').strip().lower() if school_type_col else 'preschool'
                 
                 # Validate required fields
-                if not school_data['school_name'] or not school_data['email']:
-                    errors.append(f"Row {row_num}: Missing school name or email")
-                    schools_skipped += 1
+                if not school_name or not email:
+                    errors.append(f"Row {row_count}: Missing school name or email")
                     continue
                 
-                # Clean and validate school name
-                clean_school_name = school_data['school_name'].strip()
-                if clean_school_name.lower() in existing_school_names:
-                    schools_skipped += 1
+                # Validate email format
+                if not re.match(r'^[^@]+@[^@]+\.[^@]+$', email):
+                    errors.append(f"Row {row_count}: Invalid email format '{email}'")
                     continue
                 
-                # Set default school type if not provided
-                if not school_data['school_type']:
-                    school_data['school_type'] = 'preschool'
+                # Normalize school type
+                if school_type in ['preschool', 'pre-school', 'daycare', 'day care', 'pre school']:
+                    school_type = 'preschool'
+                elif school_type in ['elementary', 'elementary school', 'elem', 'public school']:
+                    school_type = 'elementary'
+                elif school_type in ['private', 'private school', 'catholic', 'diocese', 'christian']:
+                    school_type = 'private'
+                else:
+                    # Default to preschool if not specified or unrecognized
+                    school_type = 'preschool'
                 
-                # Validate school type
-                if school_data['school_type'].lower() not in ['preschool', 'elementary']:
-                    school_data['school_type'] = 'preschool'  # Default to preschool
+                # Create unique key for school (case-insensitive)
+                school_key = school_name.lower().strip()
                 
-                # Prepare school object for bulk insert
-                school_obj = SalesSchool(
-                    school_name=clean_school_name,
+                if school_key not in schools_dict:
+                    # First occurrence of this school
+                    schools_dict[school_key] = {
+                        'school_name': school_name,
+                        'contact_name': contact_name,
+                        'phone': phone,
+                        'address': address,
+                        'school_type': school_type,
+                        'emails': [email]
+                    }
+                else:
+                    # Additional occurrence - add email if not already present
+                    existing_emails = [e.lower() for e in schools_dict[school_key]['emails']]
+                    if email.lower() not in existing_emails:
+                        schools_dict[school_key]['emails'].append(email)
+                        print(f"DEBUG: Added additional email {email} to {school_name}")
+                    
+                    # Update other fields if they were empty before but have values now
+                    if not schools_dict[school_key]['contact_name'] and contact_name:
+                        schools_dict[school_key]['contact_name'] = contact_name
+                    if not schools_dict[school_key]['phone'] and phone:
+                        schools_dict[school_key]['phone'] = phone
+                    if not schools_dict[school_key]['address'] and address:
+                        schools_dict[school_key]['address'] = address
+                
+            except Exception as e:
+                errors.append(f"Row {row_count}: Error processing row - {str(e)}")
+                continue
+        
+        print(f"DEBUG: Processed {row_count} rows, found {len(schools_dict)} unique schools")
+        
+        # Second pass: Create database entries
+        for school_key, school_data in schools_dict.items():
+            try:
+                school_name = school_data['school_name']
+                emails = school_data['emails']
+                
+                # Check if school already exists for this user
+                existing = SalesSchool.query.filter_by(
+                    school_name=school_name,
+                    user_id=user_id
+                ).first()
+                
+                if existing:
+                    schools_skipped += 1
+                    print(f"DEBUG: School '{school_name}' already exists, skipping")
+                    continue
+                
+                # Separate primary email and additional emails
+                primary_email = emails[0]
+                additional_emails = emails[1:] if len(emails) > 1 else []
+                
+                # Create new school record
+                new_school = SalesSchool(
+                    school_name=school_name,
                     contact_name=school_data['contact_name'],
-                    email=school_data['email'],
+                    email=primary_email,
                     phone=school_data['phone'],
                     address=school_data['address'],
-                    school_type=school_data['school_type'].lower(),
+                    school_type=school_data['school_type'],
                     user_id=user_id
                 )
                 
-                schools_to_add.append(school_obj)
+                # Set additional emails using the helper method
+                new_school.set_additional_emails(additional_emails)
                 
-                # Add to existing names to prevent duplicates within the same CSV
-                existing_school_names.add(clean_school_name.lower())
+                db.session.add(new_school)
+                schools_added += 1
+                
+                print(f"DEBUG: Added school '{school_name}' with {len(emails)} email(s), type: {school_data['school_type']}")
                 
             except Exception as e:
-                errors.append(f"Row {row_num}: {str(e)}")
-                schools_skipped += 1
+                errors.append(f"Error adding school '{school_data.get('school_name', 'Unknown')}': {str(e)}")
                 continue
         
-        print(f"Processed {row_count} rows, preparing to add {len(schools_to_add)} schools...")
-        
-        # OPTIMIZATION: Bulk insert all schools at once
-        if schools_to_add:
-            try:
-                # Use bulk_save_objects for better performance
-                db.session.bulk_save_objects(schools_to_add)
-                db.session.commit()
-                schools_added = len(schools_to_add)
-                print(f"Successfully bulk inserted {schools_added} schools")
-                
-            except Exception as e:
-                print(f"Bulk insert failed, falling back to individual inserts: {str(e)}")
-                # Fallback: Try adding schools individually if bulk insert fails
-                db.session.rollback()
-                
-                for school_obj in schools_to_add:
-                    try:
-                        db.session.add(school_obj)
-                        db.session.flush()  # Flush individual objects
-                        schools_added += 1
-                        
-                        # Commit in batches of 50 to avoid timeout
-                        if schools_added % 50 == 0:
-                            db.session.commit()
-                            print(f"Committed batch: {schools_added} schools added so far...")
-                            
-                    except Exception as individual_error:
-                        db.session.rollback()
-                        errors.append(f"Failed to add school '{school_obj.school_name}': {str(individual_error)}")
-                        schools_skipped += 1
-                
-                # Final commit for remaining schools
-                try:
-                    db.session.commit()
-                    print(f"Final commit: {schools_added} total schools added")
-                except Exception as final_error:
-                    print(f"Final commit failed: {str(final_error)}")
-                    db.session.rollback()
+        # Commit all changes
+        try:
+            db.session.commit()
+            print(f"DEBUG: Successfully committed {schools_added} schools to database")
+        except Exception as e:
+            db.session.rollback()
+            print(f"DEBUG: Database commit failed: {str(e)}")
+            return jsonify({"error": f"Database error: {str(e)}"}), 500
         
         return jsonify({
-            "status": "success",
+            "message": f"CSV processed successfully",
             "schools_added": schools_added,
             "schools_skipped": schools_skipped,
-            "errors": errors[:10],  # Limit errors to first 10 to avoid response size issues
-            "total_errors": len(errors),
-            "message": f"Successfully added {schools_added} schools. {schools_skipped} schools were skipped."
+            "total_rows_processed": row_count,
+            "unique_schools_found": len(schools_dict),
+            "errors": errors[:10]  # Limit errors to first 10
         })
         
     except Exception as e:
-        db.session.rollback()
-        print(f"Critical error in CSV upload: {str(e)}")
-        import traceback
-        traceback.print_exc()
-        return jsonify({"error": f"Failed to process CSV file: {str(e)}"}), 500
+        print(f"DEBUG: CSV upload error: {str(e)}")
+        return jsonify({"error": f"Failed to process CSV: {str(e)}"}), 500
 
 # ====================================================
 # API ENDPOINTS - EMAIL OPERATIONS
