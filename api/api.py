@@ -133,16 +133,38 @@ class SalesSchool(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     school_name = db.Column(db.String, nullable=False)
     contact_name = db.Column(db.String, nullable=True)
-    email = db.Column(db.String, nullable=False)
+    email = db.Column(db.String, nullable=False)  # Keep primary email
+    additional_emails = db.Column(db.Text, nullable=True)  # Store as JSON string
     phone = db.Column(db.String, nullable=True)
     address = db.Column(db.String, nullable=True)
-    school_type = db.Column(db.String, nullable=False, default='preschool')  # NEW FIELD
+    school_type = db.Column(db.String, nullable=False, default='preschool')
     status = db.Column(db.String, default='pending')
     notes = db.Column(db.Text, nullable=True)
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
     user_id = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=False)
     
     user = db.relationship('User', backref=db.backref('sales_schools', lazy=True))
+    
+    def get_all_emails(self):
+        """Get all emails for this school (primary + additional)"""
+        emails = [self.email]
+        if self.additional_emails:
+            try:
+                additional = json.loads(self.additional_emails)
+                if isinstance(additional, list):
+                    emails.extend([email.strip() for email in additional if email.strip()])
+            except (json.JSONDecodeError, TypeError):
+                pass
+        return emails
+    
+    def set_additional_emails(self, email_list):
+        """Set additional emails from a list"""
+        if email_list and isinstance(email_list, list):
+            # Filter out empty strings and the primary email
+            filtered_emails = [email.strip() for email in email_list if email.strip() and email.strip() != self.email]
+            self.additional_emails = json.dumps(filtered_emails) if filtered_emails else None
+        else:
+            self.additional_emails = None
 
 class SentEmail(db.Model):
     __tablename__ = 'sent_emails'
@@ -858,7 +880,7 @@ Best regards,
 {{ user_name }}  
 Sales Associate and Coach  
 {{ user_email }}
-https://thepsasports.com
+https://thepsports.com
 """
 
 ELEMENTARY_FOLLOWUP_TEMPLATE = """
@@ -876,7 +898,7 @@ Best regards,
 {{ user_name }}  
 Sales Associate and Coach  
 {{ user_email }}
-https://thepsasports.com
+https://thepsports.com
 """
 
 # Add private school follow-up template
@@ -1034,6 +1056,7 @@ def add_school():
     data = request.get_json()
     school_name = data.get("school_name")
     email = data.get("email")
+    additional_emails = data.get("additional_emails", [])  # New field
     contact_name = data.get("contact_name")
     phone = data.get("phone")
     address = data.get("address")
@@ -1042,7 +1065,6 @@ def add_school():
     if not all([school_name, email]):
         return jsonify({"error": "School name and email are required"}), 400
     
-    # Update validation to include private school
     if school_type not in ['preschool', 'elementary', 'private']:
         return jsonify({"error": "Invalid school type"}), 400
     
@@ -1063,9 +1085,12 @@ def add_school():
         email=email,
         phone=phone,
         address=address,
-        school_type=school_type,  # NEW FIELD
+        school_type=school_type,
         user_id=user_id
     )
+    
+    # Set additional emails
+    school.set_additional_emails(additional_emails)
     
     db.session.add(school)
     db.session.commit()
@@ -1093,9 +1118,11 @@ def get_my_schools():
             "school_name": school.school_name,
             "contact_name": school.contact_name,
             "email": school.email,
+            "additional_emails": json.loads(school.additional_emails) if school.additional_emails else [],
+            "all_emails": school.get_all_emails(),
             "phone": school.phone,
             "address": school.address,
-            "school_type": school.school_type,  # NEW FIELD
+            "school_type": school.school_type,
             "status": school.status,
             "notes": school.notes,
             "created_at": school.created_at,
@@ -1318,6 +1345,7 @@ def send_email():
     data = request.get_json()
     school_ids = data.get("school_ids", [])
     subject = data.get("subject", "Let's Connect! PSA Programs")
+    send_to_all_emails = data.get("send_to_all_emails", False)  # New option
     
     print(f"DEBUG: Received school_ids: {school_ids}")
     
@@ -1347,11 +1375,18 @@ def send_email():
 
     sent_count = 0
     errors = []
+    total_emails_to_send = 0
 
-    # **KEY FIX**: Process only first 5 schools if more than 5 selected
-    if len(schools) > 5:
-        schools = schools[:5]  # Limit to 5 emails per request
-        print(f"DEBUG: Limited to 5 schools to avoid timeout")
+    # Calculate total emails to send
+    for school in schools:
+        if send_to_all_emails:
+            total_emails_to_send += len(school.get_all_emails())
+        else:
+            total_emails_to_send += 1
+    
+    # Limit total emails to prevent timeout
+    if total_emails_to_send > 15:
+        return jsonify({"error": f"Too many emails to send ({total_emails_to_send}). Maximum is 15 per batch."}), 400
 
     for school in schools:
         try:
@@ -1377,38 +1412,55 @@ def send_email():
                 contact_name=school.contact_name or "Director/Administrator"
             )
             
-            # Send email with attachments
-            success = send_email_with_attachments(
-                from_email=user.email,
-                from_password=user.email_password,
-                to_email=school.email,
-                subject=subject,
-                body=body,
-                pdf_files=pdf_files,
-                from_name=user.name
-            )
-            
-            if success:
-                print(f"DEBUG: Email sent successfully to {school.email}")
-                
-                # Log the email
-                new_email = SentEmail(
-                    school_name=school.school_name,
-                    school_email=school.email,
-                    user_id=user_id,
-                    responded=False,
-                    followup_sent=False
-                )
-                db.session.add(new_email)
-                
-                # Update school status
-                school.status = 'contacted'
-                sent_count += 1
+            # Get emails to send to
+            if send_to_all_emails:
+                emails_to_send = school.get_all_emails()
             else:
-                errors.append(f"Failed to send to {school.school_name}")
+                emails_to_send = [school.email]  # Just primary email
+            
+            # Send to each email address
+            school_sent_count = 0
+            for email_address in emails_to_send:
+                try:
+                    success = send_email_with_attachments(
+                        from_email=user.email,
+                        from_password=user.email_password,
+                        to_email=email_address,
+                        subject=subject,
+                        body=body,
+                        pdf_files=pdf_files,
+                        from_name=user.name
+                    )
+                    
+                    if success:
+                        print(f"DEBUG: Email sent successfully to {email_address}")
+                        
+                        # Log each email separately
+                        new_email = SentEmail(
+                            school_name=school.school_name,
+                            school_email=email_address,
+                            user_id=user_id,
+                            responded=False,
+                            followup_sent=False
+                        )
+                        db.session.add(new_email)
+                        
+                        school_sent_count += 1
+                        sent_count += 1
+                    else:
+                        errors.append(f"Failed to send to {school.school_name} ({email_address})")
+                        
+                except Exception as e:
+                    error_msg = f"Failed to send to {school.school_name} ({email_address}): {str(e)}"
+                    print(f"DEBUG ERROR: {error_msg}")
+                    errors.append(error_msg)
+            
+            # Update school status if at least one email was sent
+            if school_sent_count > 0:
+                school.status = 'contacted'
             
         except Exception as e:
-            error_msg = f"Failed to send to {school.school_name}: {str(e)}"
+            error_msg = f"Failed to process {school.school_name}: {str(e)}"
             print(f"DEBUG ERROR: {error_msg}")
             errors.append(error_msg)
     
@@ -1422,7 +1474,7 @@ def send_email():
     return jsonify({
         "status": f"{sent_count} emails sent successfully" if sent_count > 0 else "Failed to send emails",
         "sent_count": sent_count,
-        "total_schools": len(schools),
+        "total_emails_attempted": total_emails_to_send,
         "errors": errors
     })
 
