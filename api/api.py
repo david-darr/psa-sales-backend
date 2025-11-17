@@ -1402,7 +1402,7 @@ def send_email():
                 pdf_files = ["PSA TOTS seasonal flyer.pdf", "PSA TOTS year round flyer.pdf", "PSA TOTS Recommendation (Primrose School).pdf"]
             elif school.school_type == 'private':
                 email_template = PRIVATE_SCHOOL_EMAIL_TEMPLATE
-                pdf_files = ["PSA After School.pdf"]  
+                pdf_files = ["PSA After School.pdf", "PSA Recommendation (St. Theresa).pdf", "PSA Recommendation (St. Veronica).pdf"]  
             else:  # elementary
                 email_template = ELEMENTARY_EMAIL_TEMPLATE
                 pdf_files = ["PSA After School.pdf", "PSA Recommendation Letter (Madison Trust ES).pdf"]
