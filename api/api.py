@@ -1654,24 +1654,29 @@ def get_sent_emails():
     else:
         emails = SentEmail.query.filter_by(user_id=user_id).all()
     
-    return jsonify([
-        {
+    # Get all email data with last sent date calculation
+    email_data = []
+    for email in emails:
+        # Calculate days since sent
+        days_ago = (datetime.utcnow() - email.sent_at).days
+        
+        # Get user name for admin view
+        sender_user = User.query.get(email.user_id) if email.user_id else None
+        
+        email_data.append({
             "id": email.id,
             "school_name": email.school_name,
             "school_email": email.school_email,
-            "sent_at": email.sent_at,
+            "sent_at": email.sent_at.isoformat(),
+            "sent_at_formatted": email.sent_at.strftime("%b %d, %Y"),
+            "days_ago": days_ago,
             "responded": email.responded,
             "followup_sent": email.followup_sent,
-            "user_name": email.user.name if hasattr(email, 'user') else None,
-            # Updated reply information
-            "reply_count": email.reply_count or 0,
-            "last_reply_date": email.last_reply_date,
-            "reply_date": email.reply_date,  # Keep for backward compatibility
-            "reply_sender": email.reply_sender,
-            "has_reply_content": bool(email.reply_content or (email.reply_count and email.reply_count > 0))
-        }
-        for email in emails
-    ])
+            "has_reply_content": bool(email.reply_content),
+            "user_name": sender_user.name if sender_user else "Unknown"
+        })
+    
+    return jsonify(email_data)
 
 @app.route("/api/delete-sent-email", methods=["DELETE"])
 @jwt_required()
