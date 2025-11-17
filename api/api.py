@@ -19,7 +19,7 @@ from datetime import datetime, timedelta, timezone
 import traceback
 import gspread
 import csv
-import io
+from io import StringIO
 
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
