@@ -1349,7 +1349,7 @@ def send_email():
     data = request.get_json()
     school_ids = data.get("school_ids", [])
     subject = data.get("subject", "Let's Connect! PSA Programs")
-    send_to_all_emails = data.get("send_to_all_emails", False)  # New option
+    send_to_all_emails = data.get("send_to_all_emails", False)
     
     print(f"DEBUG: Received school_ids: {school_ids}")
     
@@ -1377,106 +1377,144 @@ def send_email():
     if not schools:
         return jsonify({"error": "No valid schools found"}), 400
 
+    # NEW: Smart batching based on actual email count, not just school count
+    MAX_EMAILS_PER_BATCH = 8  # Reduced from implied 15 to be safer
+    current_batch = []
+    current_batch_email_count = 0
+    all_batches = []
+    
+    for school in schools:
+        # Calculate how many emails this school will generate
+        if send_to_all_emails:
+            school_email_count = len(school.get_all_emails())
+        else:
+            school_email_count = 1
+        
+        # If adding this school would exceed the batch limit, start a new batch
+        if current_batch and (current_batch_email_count + school_email_count > MAX_EMAILS_PER_BATCH):
+            all_batches.append(current_batch)
+            current_batch = [school]
+            current_batch_email_count = school_email_count
+        else:
+            current_batch.append(school)
+            current_batch_email_count += school_email_count
+    
+    # Add the last batch if it has schools
+    if current_batch:
+        all_batches.append(current_batch)
+    
+    print(f"DEBUG: Created {len(all_batches)} batches with max {MAX_EMAILS_PER_BATCH} emails per batch")
+    
     sent_count = 0
     errors = []
-    total_emails_to_send = 0
-
-    # Calculate total emails to send
-    for school in schools:
-        if send_to_all_emails:
-            total_emails_to_send += len(school.get_all_emails())
-        else:
-            total_emails_to_send += 1
     
-    
-
-    for school in schools:
-        try:
-            print(f"DEBUG: Processing school: {school.school_name}")
-            
-            # Determine email template and PDF files based on school type
-            if school.school_type == 'preschool':
-                email_template = PRESCHOOL_EMAIL_TEMPLATE
-                pdf_files = ["PSA TOTS seasonal flyer.pdf", "PSA TOTS year round flyer.pdf", "PSA TOTS Recommendation (Primrose School).pdf"]
-            elif school.school_type == 'private':
-                email_template = PRIVATE_SCHOOL_EMAIL_TEMPLATE
-                pdf_files = ["PSA After School.pdf", "PSA Recommendation (St. Theresa).pdf", "PSA Recommendation (St. Veronica).pdf"]  
-            else:  # elementary
-                email_template = ELEMENTARY_EMAIL_TEMPLATE
-                pdf_files = ["PSA After School.pdf", "PSA Recommendation Letter (Madison Trust ES).pdf"]
-            
-            # Create email body
-            body = render_template_string(
-                email_template,
-                user_name=user.name,
-                user_email=user.email,
-                school_name=school.school_name,
-                contact_name=school.contact_name or "Director/Administrator"
-            )
-            
-            # Get emails to send to
+    # Process each batch
+    for batch_idx, batch_schools in enumerate(all_batches):
+        print(f"DEBUG: Processing batch {batch_idx + 1}/{len(all_batches)} with {len(batch_schools)} schools")
+        
+        batch_email_count = 0
+        for school in batch_schools:
             if send_to_all_emails:
-                emails_to_send = school.get_all_emails()
+                batch_email_count += len(school.get_all_emails())
             else:
-                emails_to_send = [school.email]  # Just primary email
-            
-            # Send to each email address
-            school_sent_count = 0
-            for email_address in emails_to_send:
-                try:
-                    success = send_email_with_attachments(
-                        from_email=user.email,
-                        from_password=user.email_password,
-                        to_email=email_address,
-                        subject=subject,
-                        body=body,
-                        pdf_files=pdf_files,
-                        from_name=user.name
-                    )
-                    
-                    if success:
-                        print(f"DEBUG: Email sent successfully to {email_address}")
-                        
-                        # Log each email separately
-                        new_email = SentEmail(
-                            school_name=school.school_name,
-                            school_email=email_address,
-                            user_id=user_id,
-                            responded=False,
-                            followup_sent=False
+                batch_email_count += 1
+        
+        print(f"DEBUG: Batch will send {batch_email_count} emails")
+        
+        # Process schools in this batch
+        for school in batch_schools:
+            try:
+                print(f"DEBUG: Processing school: {school.school_name}")
+                
+                # Determine email template and PDF files based on school type
+                if school.school_type == 'preschool':
+                    email_template = PRESCHOOL_EMAIL_TEMPLATE
+                    pdf_files = ["PSA TOTS seasonal flyer.pdf", "PSA TOTS year round flyer.pdf", "PSA TOTS Recommendation (Primrose School).pdf"]
+                elif school.school_type == 'private':
+                    email_template = PRIVATE_SCHOOL_EMAIL_TEMPLATE
+                    pdf_files = ["PSA After School.pdf", "PSA Recommendation (St. Theresa).pdf"]
+                else:  # elementary
+                    email_template = ELEMENTARY_EMAIL_TEMPLATE
+                    pdf_files = ["PSA After School.pdf", "PSA Recommendation Letter (Madison Trust ES).pdf"]
+                
+                # Create email body
+                body = render_template_string(
+                    email_template,
+                    user_name=user.name,
+                    user_email=user.email,
+                    school_name=school.school_name,
+                    contact_name=school.contact_name or "Director/Administrator"
+                )
+                
+                # Get emails to send to
+                if send_to_all_emails:
+                    emails_to_send = school.get_all_emails()
+                else:
+                    emails_to_send = [school.email]
+                
+                # Send to each email address
+                school_sent_count = 0
+                for email_address in emails_to_send:
+                    try:
+                        success = send_email_with_attachments(
+                            from_email=user.email,
+                            from_password=user.email_password,
+                            to_email=email_address,
+                            subject=subject,
+                            body=body,
+                            pdf_files=pdf_files,
+                            from_name=user.name
                         )
-                        db.session.add(new_email)
                         
-                        school_sent_count += 1
-                        sent_count += 1
-                    else:
-                        errors.append(f"Failed to send to {school.school_name} ({email_address})")
-                        
-                except Exception as e:
-                    error_msg = f"Failed to send to {school.school_name} ({email_address}): {str(e)}"
-                    print(f"DEBUG ERROR: {error_msg}")
-                    errors.append(error_msg)
-            
-            # Update school status if at least one email was sent
-            if school_sent_count > 0:
-                school.status = 'contacted'
-            
+                        if success:
+                            print(f"DEBUG: Email sent successfully to {email_address}")
+                            
+                            # Log each email separately
+                            new_email = SentEmail(
+                                school_name=school.school_name,
+                                school_email=email_address,
+                                user_id=user_id,
+                                responded=False,
+                                followup_sent=False
+                            )
+                            db.session.add(new_email)
+                            
+                            school_sent_count += 1
+                            sent_count += 1
+                        else:
+                            errors.append(f"Failed to send to {school.school_name} ({email_address})")
+                            
+                    except Exception as e:
+                        error_msg = f"Failed to send to {school.school_name} ({email_address}): {str(e)}"
+                        print(f"DEBUG ERROR: {error_msg}")
+                        errors.append(error_msg)
+                
+                # Update school status if at least one email was sent
+                if school_sent_count > 0:
+                    school.status = 'contacted'
+                
+            except Exception as e:
+                error_msg = f"Failed to process {school.school_name}: {str(e)}"
+                print(f"DEBUG ERROR: {error_msg}")
+                errors.append(error_msg)
+        
+        # Commit after each batch to save progress
+        try:
+            db.session.commit()
+            print(f"DEBUG: Batch {batch_idx + 1} committed successfully")
         except Exception as e:
-            error_msg = f"Failed to process {school.school_name}: {str(e)}"
-            print(f"DEBUG ERROR: {error_msg}")
-            errors.append(error_msg)
-    
-    try:
-        db.session.commit()
-        print(f"DEBUG: Database committed successfully")
-    except Exception as e:
-        print(f"DEBUG: Database commit error: {str(e)}")
-        db.session.rollback()
+            print(f"DEBUG: Batch {batch_idx + 1} commit error: {str(e)}")
+            db.session.rollback()
+        
+        # Add delay between batches (except after the last batch)
+        if batch_idx < len(all_batches) - 1:
+            print("DEBUG: Waiting 3 seconds before next batch...")
+            time.sleep(3)
     
     return jsonify({
-        "status": f"{sent_count} emails sent successfully" if sent_count > 0 else "Failed to send emails",
+        "status": f"{sent_count} emails sent successfully in {len(all_batches)} batches" if sent_count > 0 else "Failed to send emails",
         "sent_count": sent_count,
-        "total_emails_attempted": total_emails_to_send,
+        "batches_processed": len(all_batches),
         "errors": errors
     })
 
@@ -1929,6 +1967,7 @@ def refresh_map_schools():
             "type": "happyfeet",
             "lat": lat,
             "lng": lng
+       
         })
         time.sleep(0.1)  # 100ms delay
 
