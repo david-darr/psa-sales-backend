@@ -1388,9 +1388,7 @@ def send_email():
         else:
             total_emails_to_send += 1
     
-    # Limit total emails to prevent timeout
-    if total_emails_to_send > 15:
-        return jsonify({"error": f"Too many emails to send ({total_emails_to_send}). Maximum is 15 per batch."}), 400
+    
 
     for school in schools:
         try:
