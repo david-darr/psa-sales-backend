@@ -239,7 +239,7 @@ def split_sheet_schools(sheet_rows):
         if "elementary" in indicator or "psa" in indicator or "happyfeet" in indicator:
             print(f"DEBUG: Found potential header: '{indicator}' (original: '{row[1]}')")
         
-        # Check for section headers - UPDATED TO BE MORE FLEXIBLE
+        # Check for section headers
         if indicator == "psa preschool" or indicator == "northern virginia (psa)":
             mode = "psa"
             print(f"DEBUG: Switched to PSA mode")
@@ -248,7 +248,7 @@ def split_sheet_schools(sheet_rows):
             mode = "happyfeet"
             print(f"DEBUG: Switched to HappyFeet mode")
             continue
-        elif "elementary" in indicator:  # More flexible matching
+        elif indicator == "elementary": 
             mode = "elementary"
             print(f"DEBUG: Switched to ELEMENTARY mode with header: '{indicator}'")
             continue
