@@ -227,6 +227,7 @@ def split_sheet_schools(sheet_rows):
     elementary_catholic = []
     mode = None
     
+    # ADD THIS DEBUG LINE AT THE START
     print(f"DEBUG: Processing {len(sheet_rows)} rows from sheet")
     
     for row in sheet_rows:
@@ -234,7 +235,7 @@ def split_sheet_schools(sheet_rows):
             continue
         indicator = str(row[1]).strip().lower()
         
-        # Add more detailed logging
+        # ADD MORE DETAILED LOGGING
         if "elementary" in indicator or "psa" in indicator or "happyfeet" in indicator:
             print(f"DEBUG: Found potential header: '{indicator}' (original: '{row[1]}')")
         
@@ -247,7 +248,7 @@ def split_sheet_schools(sheet_rows):
             mode = "happyfeet"
             print(f"DEBUG: Switched to HappyFeet mode")
             continue
-        elif indicator == "elementary":  # Only exact match "elementary"
+        elif indicator == "elementary": 
             mode = "elementary"
             print(f"DEBUG: Switched to ELEMENTARY mode with header: '{indicator}'")
             continue
@@ -256,44 +257,32 @@ def split_sheet_schools(sheet_rows):
         if mode == "psa":
             name = str(row[1]).strip()
             address = str(row[13]).strip()
-            # More specific filtering - only skip if it's EXACTLY a generic name
-            if not name or not address or indicator in GENERIC_NAMES:
+            if not name or not address or name.lower() in GENERIC_NAMES:
                 continue
             psa_preschools.append({"name": name, "address": address})
             
         elif mode == "happyfeet":
             name = str(row[1]).strip()
             address = str(row[14]).strip()
-            # More specific filtering
-            if not name or not address or indicator in GENERIC_NAMES:
+            if not name or not address or name.lower() in GENERIC_NAMES:
                 continue
             happy_feet.append({"name": name, "address": address})
             
         elif mode == "elementary":
             name = str(row[1]).strip()
-            address = str(row[13]).strip()
-            # More specific filtering - don't skip schools that just contain "elementary" in their name
-            if not name or not address or indicator in GENERIC_NAMES:
-                print(f"DEBUG: Skipped generic name: {name}")
+            address = str(row[14]).strip()
+            if not name or not address or name.lower() in GENERIC_NAMES:
                 continue
             print(f"DEBUG: Added elementary school: {name} at {address}")
             elementary_catholic.append({"name": name, "address": address})
     
+    # ADD SUMMARY LOGGING
     print(f"DEBUG: Final counts - PSA: {len(psa_preschools)}, HappyFeet: {len(happy_feet)}, Elementary: {len(elementary_catholic)}")
     
     return psa_preschools, happy_feet, elementary_catholic
 
 # MOVE THESE CONSTANTS HERE - BEFORE THE FUNCTION IS CALLED
-GENERIC_NAMES = {
-    "elementary",           # Just the word by itself
-    "preschool",           # Just the word by itself
-    "school name",         # Generic placeholder
-    "elementary school",   # Generic phrase
-    "psa preschool",       # Section headers
-    "happyfeet preschool", # Section headers
-    "northern virginia (psa)",
-    "northern virginia (happyfeet)"
-}
+GENERIC_NAMES = {"elementary", "preschool", "school name", "elementary school"}
 MAP_SCHOOL_CACHE = {}
 
 REC_SITES = [
