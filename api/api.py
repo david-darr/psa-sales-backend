@@ -221,54 +221,65 @@ def load_PSA_school_sheet():
 def split_sheet_schools(sheet_rows):
     """
     Splits sheet rows into PSA Preschools, Happy Feet, and Elementary/Catholic schools based on indicator rows.
-    PSA Preschools: column 2 is name, column 14 is address.
-    Happy Feet: column 2 is name, column 15 is address.
-    Elementary/Catholic: column 2 is name, column 14 is address (same as PSA).
     """
     psa_preschools = []
     happy_feet = []
-    elementary_catholic = []  # NEW: Third category
-    mode = None  # None, "psa", "happyfeet", "elementary"
+    elementary_catholic = []
+    mode = None
+    
+    # ADD THIS DEBUG LINE AT THE START
+    print(f"DEBUG: Processing {len(sheet_rows)} rows from sheet")
     
     for row in sheet_rows:
         if len(row) < 15:
             continue
         indicator = str(row[1]).strip().lower()
         
-        # Check for section headers
-        if indicator == "psa preschool":
+        # ADD MORE DETAILED LOGGING
+        if "elementary" in indicator or "psa" in indicator or "happyfeet" in indicator:
+            print(f"DEBUG: Found potential header: '{indicator}' (original: '{row[1]}')")
+        
+        # Check for section headers - UPDATED TO BE MORE FLEXIBLE
+        if indicator == "psa preschool" or indicator == "northern virginia (psa)":
             mode = "psa"
+            print(f"DEBUG: Switched to PSA mode")
             continue
-        elif indicator == "happyfeet preschool":
+        elif indicator == "happyfeet preschool" or indicator == "northern virginia (happyfeet)":
             mode = "happyfeet"
+            print(f"DEBUG: Switched to HappyFeet mode")
             continue
-        elif indicator == "elementary":
-            mode = "elementary"  
+        elif "elementary" in indicator:  # More flexible matching
+            mode = "elementary"
+            print(f"DEBUG: Switched to ELEMENTARY mode with header: '{indicator}'")
             continue
         
         # Extract school data based on mode
         if mode == "psa":
             name = str(row[1]).strip()
-            address = str(row[13]).strip()  # Column 14 (index 13)
+            address = str(row[13]).strip()
             if not name or not address or name.lower() in GENERIC_NAMES:
                 continue
             psa_preschools.append({"name": name, "address": address})
             
         elif mode == "happyfeet":
             name = str(row[1]).strip()
-            address = str(row[14]).strip()  # Column 15 (index 14)
+            address = str(row[14]).strip()
             if not name or not address or name.lower() in GENERIC_NAMES:
                 continue
             happy_feet.append({"name": name, "address": address})
             
-        elif mode == "elementary":  # NEW: Handle elementary/catholic schools
+        elif mode == "elementary":
             name = str(row[1]).strip()
-            address = str(row[13]).strip()  # Column 14 (index 13) - same as PSA
+            address = str(row[13]).strip()
             if not name or not address or name.lower() in GENERIC_NAMES:
                 continue
+            print(f"DEBUG: Added elementary school: {name} at {address}")
             elementary_catholic.append({"name": name, "address": address})
     
-    return psa_preschools, happy_feet, elementary_catholic  # Return all three lists
+    # ADD SUMMARY LOGGING
+    print(f"DEBUG: Final counts - PSA: {len(psa_preschools)}, HappyFeet: {len(happy_feet)}, Elementary: {len(elementary_catholic)}")
+    
+    return psa_preschools, happy_feet, elementary_catholic
 
 # MOVE THESE CONSTANTS HERE - BEFORE THE FUNCTION IS CALLED
 GENERIC_NAMES = {"elementary", "preschool", "school name", "elementary school"}
