@@ -220,42 +220,62 @@ def load_PSA_school_sheet():
 
 def split_sheet_schools(sheet_rows):
     """
-    Splits sheet rows into PSA Preschools and Happy Feet schools based on indicator rows.
+    Splits sheet rows into PSA Preschools, Happy Feet, and Elementary/Catholic schools based on indicator rows.
     PSA Preschools: column 2 is name, column 14 is address.
     Happy Feet: column 2 is name, column 15 is address.
+    Elementary/Catholic: column 2 is name, column 14 is address (same as PSA).
     """
     psa_preschools = []
     happy_feet = []
-    mode = None  # None, "psa", "happyfeet"
+    elementary_catholic = []  # NEW: Third category
+    mode = None  # None, "psa", "happyfeet", "elementary"
     
     for row in sheet_rows:
         if len(row) < 15:
             continue
         indicator = str(row[1]).strip().lower()
-        if indicator == "northern virginia (psa)":
+        
+        # Check for section headers
+        if indicator == "psa preschool":
             mode = "psa"
             continue
-        elif indicator == "northern virginia (happyfeet)":
+        elif indicator == "happyfeet preschool":
             mode = "happyfeet"
             continue
+        elif indicator == "elementary":
+            mode = "elementary"  
+            continue
         
+        # Extract school data based on mode
         if mode == "psa":
             name = str(row[1]).strip()
-            address = str(row[13]).strip()
-            if not name or not address or name.lower() in {"school name", "elementary", "preschool"}:
+            address = str(row[13]).strip()  # Column 14 (index 13)
+            if not name or not address or name.lower() in GENERIC_NAMES:
                 continue
             psa_preschools.append({"name": name, "address": address})
+            
         elif mode == "happyfeet":
             name = str(row[1]).strip()
-            address = str(row[14]).strip()
-            if not name or not address or name.lower() in {"school name", "elementary", "preschool"}:
+            address = str(row[14]).strip()  # Column 15 (index 14)
+            if not name or not address or name.lower() in GENERIC_NAMES:
                 continue
             happy_feet.append({"name": name, "address": address})
+            
+        elif mode == "elementary":  # NEW: Handle elementary/catholic schools
+            name = str(row[1]).strip()
+            address = str(row[13]).strip()  # Column 14 (index 13) - same as PSA
+            if not name or not address or name.lower() in GENERIC_NAMES:
+                continue
+            elementary_catholic.append({"name": name, "address": address})
     
-    return psa_preschools, happy_feet
+    return psa_preschools, happy_feet, elementary_catholic  # Return all three lists
 
-# Initialize cached sheet data
-psa_preschools, happy_feet = split_sheet_schools(load_PSA_school_sheet())
+# Initialize cached sheet data - NOW WITH THREE CATEGORIES
+psa_preschools, happy_feet, elementary_catholic = split_sheet_schools(load_PSA_school_sheet())
+
+print(f"Loaded {len(psa_preschools)} PSA preschools")
+print(f"Loaded {len(happy_feet)} Happy Feet schools")
+print(f"Loaded {len(elementary_catholic)} Elementary/Catholic schools")
 
 # Constants
 REC_SITES = [
@@ -1378,7 +1398,7 @@ def send_email():
         return jsonify({"error": "No valid schools found"}), 400
 
     # NEW: Smart batching based on actual email count, not just school count
-    MAX_EMAILS_PER_BATCH = 8  # Reduced from implied 15 to be safer
+    MAX_EMAILS_PER_BATCH = 3  
     current_batch = []
     current_batch_email_count = 0
     all_batches = []
@@ -1838,10 +1858,11 @@ def find_schools():
     elif re.fullmatch(r"[a-zA-Z ]+", address.strip()):
         address = f"{address.strip()} USA"
 
-    # Get normalized names of schools we already do business with
+    # Get normalized names of schools we already do business with - NOW INCLUDING ELEMENTARY
     happy_feet_names = set([normalize_name(s["name"]) for s in happy_feet])
     psa_names = set([normalize_name(s["name"]) for s in psa_preschools])
-    excluded_names = happy_feet_names | psa_names
+    elementary_names = set([normalize_name(s["name"]) for s in elementary_catholic])  # NEW
+    excluded_names = happy_feet_names | psa_names | elementary_names  # Updated to include elementary
 
     # Geocode the address
     lat, lng = geocode_address(address)
@@ -1956,8 +1977,9 @@ def map_schools():
 def refresh_map_schools():
     global MAP_SCHOOL_CACHE
     new_sheet_rows = load_PSA_school_sheet()
-    psa_preschools, happy_feet = split_sheet_schools(new_sheet_rows)
+    psa_preschools, happy_feet, elementary_catholic = split_sheet_schools(new_sheet_rows)  # Updated to get 3 lists
 
+    # Geocode Happy Feet schools
     happy_feet_geocoded = []
     for s in happy_feet:
         lat, lng = geocode_address(s["address"])
@@ -1967,10 +1989,10 @@ def refresh_map_schools():
             "type": "happyfeet",
             "lat": lat,
             "lng": lng
-       
         })
         time.sleep(0.1)  # 100ms delay
 
+    # Geocode PSA Preschools
     psa_preschools_geocoded = []
     for s in psa_preschools:
         lat, lng = geocode_address(s["address"])
@@ -1983,6 +2005,20 @@ def refresh_map_schools():
         })
         time.sleep(0.1)  # 100ms delay
 
+    # NEW: Geocode Elementary/Catholic schools
+    elementary_geocoded = []
+    for s in elementary_catholic:
+        lat, lng = geocode_address(s["address"])
+        elementary_geocoded.append({
+            "name": s["name"],
+            "address": s["address"],
+            "type": "elementary",
+            "lat": lat,
+            "lng": lng
+        })
+        time.sleep(0.1)  # 100ms delay
+
+    # Geocode Recreation Sites
     rec_geocoded = []
     for site in REC_SITES:
         lat, lng = geocode_address(site["address"])
@@ -1994,9 +2030,11 @@ def refresh_map_schools():
             "lng": lng
         })
 
+    # Update cache with all four categories
     MAP_SCHOOL_CACHE = {
         "happyfeet": happy_feet_geocoded,
         "psa": psa_preschools_geocoded,
+        "elementary": elementary_geocoded,  # NEW: Add elementary schools to cache
         "rec": rec_geocoded,
     }
     return jsonify({"status": "refreshed"})
