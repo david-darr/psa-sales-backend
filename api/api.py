@@ -270,7 +270,16 @@ def split_sheet_schools(sheet_rows):
     
     return psa_preschools, happy_feet, elementary_catholic  # Return all three lists
 
-# Initialize cached sheet data - NOW WITH THREE CATEGORIES
+# MOVE THESE CONSTANTS HERE - BEFORE THE FUNCTION IS CALLED
+GENERIC_NAMES = {"elementary", "preschool", "school name", "elementary school"}
+MAP_SCHOOL_CACHE = {}
+
+REC_SITES = [
+    {"name": "Hanson Park", "address": "22831 Hanson Park Dr, Aldie, VA 20105"},
+    {"name": "Heron Overlook", "address": "20550 Heron overlook Plz, Ashburn, VA 20147"}
+]
+
+# NOW call the function - constants are defined
 psa_preschools, happy_feet, elementary_catholic = split_sheet_schools(load_PSA_school_sheet())
 
 print(f"Loaded {len(psa_preschools)} PSA preschools")
@@ -278,13 +287,13 @@ print(f"Loaded {len(happy_feet)} Happy Feet schools")
 print(f"Loaded {len(elementary_catholic)} Elementary/Catholic schools")
 
 # Constants
-REC_SITES = [
-    {"name": "Hanson Park", "address": "22831 Hanson Park Dr, Aldie, VA 20105"},
-    {"name": "Heron Overlook", "address": "20550 Heron overlook Plz, Ashburn, VA 20147"}
-]
+# REC_SITES = [
+#     {"name": "Hanson Park", "address": "22831 Hanson Park Dr, Aldie, VA 20105"},
+#     {"name": "Heron Overlook", "address": "20550 Heron overlook Plz, Ashburn, VA 20147"}
+# ]
 
-GENERIC_NAMES = {"elementary", "preschool", "school name", "elementary school"}
-MAP_SCHOOL_CACHE = {}
+# GENERIC_NAMES = {"elementary", "preschool", "school name", "elementary school"}
+# MAP_SCHOOL_CACHE = {}
 
 # ====================================================
 # UTILITY FUNCTIONS
