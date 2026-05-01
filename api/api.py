@@ -2214,6 +2214,81 @@ def send_custom_reply():
         print(f"Error sending custom reply: {str(e)}")
         return jsonify({"error": f"Failed to send custom reply: {str(e)}"}), 500
 
+@app.route("/api/send-custom-email", methods=["POST"])
+@jwt_required()
+def send_custom_email():
+    """Send a custom/freeform email to a school"""
+    ALLOWED_PDFS = {
+        "PSA TOTS seasonal flyer.pdf",
+        "PSA TOTS year round flyer.pdf",
+        "PSA TOTS Recommendation (Primrose School).pdf",
+        "PSA After School.pdf",
+        "PSA Recommendation (St. Theresa).pdf",
+        "PSA Recommendation Letter (Madison Trust ES).pdf",
+    }
+
+    data = request.get_json()
+    school_id = data.get("school_id")
+    to_email = data.get("to_email")
+    subject = data.get("subject")
+    message = data.get("message")
+    requested_pdfs = data.get("pdf_files", [])
+    pdf_files = [p for p in requested_pdfs if p in ALLOWED_PDFS]
+
+    if not all([school_id, to_email, subject, message]):
+        return jsonify({"error": "Missing required fields"}), 400
+
+    user_id = get_jwt_identity()
+    user = User.query.get(user_id)
+
+    if not user or not user.email_password:
+        return jsonify({"error": "User or email settings not configured"}), 400
+
+    if user.admin:
+        school = SalesSchool.query.get(school_id)
+    else:
+        school = SalesSchool.query.filter_by(id=school_id, user_id=user_id).first()
+
+    if not school:
+        return jsonify({"error": "School not found"}), 404
+
+    def apply_vars(text):
+        return (text
+            .replace('[school_name]', school.school_name or '')
+            .replace('[contact_name]', school.contact_name or 'Director/Administrator')
+            .replace('[user_name]', user.name or '')
+            .replace('[user_email]', user.email or ''))
+
+    try:
+        success = send_email_with_attachments(
+            from_email=user.email,
+            from_password=user.email_password,
+            to_email=to_email,
+            subject=apply_vars(subject),
+            body=apply_vars(message),
+            pdf_files=pdf_files,
+            from_name=user.name
+        )
+
+        if success:
+            new_email = SentEmail(
+                school_name=school.school_name,
+                school_email=to_email,
+                user_id=user_id,
+                responded=False,
+                followup_sent=False
+            )
+            db.session.add(new_email)
+            school.status = 'contacted'
+            db.session.commit()
+            return jsonify({"status": "Custom email sent successfully"})
+        else:
+            return jsonify({"error": "Failed to send email"}), 500
+
+    except Exception as e:
+        print(f"Error sending custom email: {str(e)}")
+        return jsonify({"error": f"Failed to send email: {str(e)}"}), 500
+
 # ====================================================
 # APPLICATION STARTUP
 # ====================================================
