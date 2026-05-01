@@ -2329,62 +2329,54 @@ def send_custom_email_bulk():
     if not schools:
         return jsonify({"error": "No valid schools found"}), 400
 
-    MAX_EMAILS_PER_BATCH = 3
     sent_count = 0
     errors = []
 
-    batches = [schools[i:i + MAX_EMAILS_PER_BATCH] for i in range(0, len(schools), MAX_EMAILS_PER_BATCH)]
-
-    for batch_idx, batch in enumerate(batches):
-        for school in batch:
-            def apply_vars(text, s=school):
-                return (text
-                    .replace('[school_name]', s.school_name or '')
-                    .replace('[contact_name]', s.contact_name or 'Director/Administrator')
-                    .replace('[user_name]', user.name or '')
-                    .replace('[user_email]', user.email or ''))
-
-            try:
-                success = send_email_with_attachments(
-                    from_email=user.email,
-                    from_password=user.email_password,
-                    to_email=school.email,
-                    subject=apply_vars(subject),
-                    body=apply_vars(message),
-                    pdf_files=pdf_files,
-                    from_name=user.name
-                )
-
-                if success:
-                    new_email = SentEmail(
-                        school_name=school.school_name,
-                        school_email=school.email,
-                        user_id=user_id,
-                        responded=False,
-                        followup_sent=False
-                    )
-                    db.session.add(new_email)
-                    school.status = 'contacted'
-                    sent_count += 1
-                else:
-                    errors.append(f"Failed to send to {school.school_name}")
-
-            except Exception as e:
-                errors.append(f"Failed to send to {school.school_name}: {str(e)}")
+    for school in schools:
+        def apply_vars(text, s=school):
+            return (text
+                .replace('[school_name]', s.school_name or '')
+                .replace('[contact_name]', s.contact_name or 'Director/Administrator')
+                .replace('[user_name]', user.name or '')
+                .replace('[user_email]', user.email or ''))
 
         try:
-            db.session.commit()
-        except Exception as e:
-            db.session.rollback()
-            print(f"Batch {batch_idx + 1} commit error: {str(e)}")
+            success = send_email_with_attachments(
+                from_email=user.email,
+                from_password=user.email_password,
+                to_email=school.email,
+                subject=apply_vars(subject),
+                body=apply_vars(message),
+                pdf_files=pdf_files,
+                from_name=user.name
+            )
 
-        if batch_idx < len(batches) - 1:
-            time.sleep(3)
+            if success:
+                new_email = SentEmail(
+                    school_name=school.school_name,
+                    school_email=school.email,
+                    user_id=user_id,
+                    responded=False,
+                    followup_sent=False
+                )
+                db.session.add(new_email)
+                school.status = 'contacted'
+                sent_count += 1
+            else:
+                errors.append(f"Failed to send to {school.school_name}")
+
+        except Exception as e:
+            errors.append(f"Failed to send to {school.school_name}: {str(e)}")
+
+    try:
+        db.session.commit()
+    except Exception as e:
+        db.session.rollback()
+        print(f"Commit error: {str(e)}")
 
     return jsonify({
         "status": f"{sent_count} emails sent successfully" if sent_count > 0 else "Failed to send emails",
         "sent_count": sent_count,
-        "batches_processed": len(batches),
         "errors": errors
     })
 
