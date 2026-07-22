@@ -1171,6 +1171,38 @@ def get_my_schools():
         for school in schools
     ])
 
+@app.route("/api/delete-school", methods=["DELETE"])
+@jwt_required()
+def delete_school():
+    data = request.get_json()
+    school_id = data.get("school_id")
+
+    if not school_id:
+        return jsonify({"error": "Missing school_id"}), 400
+
+    user_id = get_jwt_identity()
+    user = User.query.get(user_id)
+
+    if not user:
+        return jsonify({"error": "User not found"}), 404
+
+    # Find the school - admins can delete any, users only their own
+    if user.admin:
+        school = SalesSchool.query.get(school_id)
+    else:
+        school = SalesSchool.query.filter_by(id=school_id, user_id=user_id).first()
+
+    if not school:
+        return jsonify({"error": "School not found"}), 404
+
+    try:
+        db.session.delete(school)
+        db.session.commit()
+        return jsonify({"status": "School deleted successfully"})
+    except Exception as e:
+        db.session.rollback()
+        return jsonify({"error": str(e)}), 500
+
 @app.route("/api/schools", methods=["GET"])
 def get_schools():
     """Return all schools from the database."""
@@ -1417,214 +1449,189 @@ def send_email():
     if not schools:
         return jsonify({"error": "No valid schools found"}), 400
 
-    # NEW: Smart batching based on actual email count, not just school count
-    MAX_EMAILS_PER_BATCH = 3  
-    current_batch = []
-    current_batch_email_count = 0
-    all_batches = []
-    
+    # Build one send job per (school, email address) pair. Templates/PDFs/body are all
+    # precomputed here so the SMTP loop below only has to log in once and send.
+    jobs = []
     for school in schools:
-        # Calculate how many emails this school will generate
-        if send_to_all_emails:
-            school_email_count = len(school.get_all_emails())
-        else:
-            school_email_count = 1
-        
-        # If adding this school would exceed the batch limit, start a new batch
-        if current_batch and (current_batch_email_count + school_email_count > MAX_EMAILS_PER_BATCH):
-            all_batches.append(current_batch)
-            current_batch = [school]
-            current_batch_email_count = school_email_count
-        else:
-            current_batch.append(school)
-            current_batch_email_count += school_email_count
-    
-    # Add the last batch if it has schools
-    if current_batch:
-        all_batches.append(current_batch)
-    
-    print(f"DEBUG: Created {len(all_batches)} batches with max {MAX_EMAILS_PER_BATCH} emails per batch")
-    
+        if school.school_type == 'preschool':
+            email_template = PRESCHOOL_EMAIL_TEMPLATE
+            pdf_files = ["PSA TOTS seasonal flyer.pdf", "PSA TOTS year round flyer.pdf", "PSA TOTS Recommendation (Primrose School).pdf"]
+        elif school.school_type == 'private':
+            email_template = PRIVATE_SCHOOL_EMAIL_TEMPLATE
+            pdf_files = ["PSA After School.pdf", "PSA Recommendation (St. Theresa).pdf"]
+        else:  # elementary
+            email_template = ELEMENTARY_EMAIL_TEMPLATE
+            pdf_files = ["PSA After School.pdf", "PSA Recommendation Letter (Madison Trust ES).pdf"]
+
+        body = render_template_string(
+            email_template,
+            user_name=user.name,
+            user_email=user.email,
+            school_name=school.school_name,
+            contact_name=school.contact_name or "Director/Administrator"
+        )
+
+        emails_to_send = school.get_all_emails() if send_to_all_emails else [school.email]
+        for email_address in emails_to_send:
+            jobs.append({
+                "school": school,
+                "to_email": email_address,
+                "subject": subject,
+                "body": body,
+                "pdf_files": pdf_files
+            })
+
+    print(f"DEBUG: Sending {len(jobs)} emails over a single SMTP connection")
+
+    # One login, one connection reused for every email in this request - this is what
+    # actually avoids the request timing out on large batches (previously each email
+    # opened its own SMTP connection, plus a blocking 3s sleep between sub-batches).
+    results = send_emails_over_connection(user.email, user.email_password, user.name, jobs)
+
     sent_count = 0
     errors = []
-    
-    # Process each batch
-    for batch_idx, batch_schools in enumerate(all_batches):
-        print(f"DEBUG: Processing batch {batch_idx + 1}/{len(all_batches)} with {len(batch_schools)} schools")
-        
-        batch_email_count = 0
-        for school in batch_schools:
-            if send_to_all_emails:
-                batch_email_count += len(school.get_all_emails())
-            else:
-                batch_email_count += 1
-        
-        print(f"DEBUG: Batch will send {batch_email_count} emails")
-        
-        # Process schools in this batch
-        for school in batch_schools:
-            try:
-                print(f"DEBUG: Processing school: {school.school_name}")
-                
-                # Determine email template and PDF files based on school type
-                if school.school_type == 'preschool':
-                    email_template = PRESCHOOL_EMAIL_TEMPLATE
-                    pdf_files = ["PSA TOTS seasonal flyer.pdf", "PSA TOTS year round flyer.pdf", "PSA TOTS Recommendation (Primrose School).pdf"]
-                elif school.school_type == 'private':
-                    email_template = PRIVATE_SCHOOL_EMAIL_TEMPLATE
-                    pdf_files = ["PSA After School.pdf", "PSA Recommendation (St. Theresa).pdf"]
-                else:  # elementary
-                    email_template = ELEMENTARY_EMAIL_TEMPLATE
-                    pdf_files = ["PSA After School.pdf", "PSA Recommendation Letter (Madison Trust ES).pdf"]
-                
-                # Create email body
-                body = render_template_string(
-                    email_template,
-                    user_name=user.name,
-                    user_email=user.email,
-                    school_name=school.school_name,
-                    contact_name=school.contact_name or "Director/Administrator"
-                )
-                
-                # Get emails to send to
-                if send_to_all_emails:
-                    emails_to_send = school.get_all_emails()
-                else:
-                    emails_to_send = [school.email]
-                
-                # Send to each email address
-                school_sent_count = 0
-                for email_address in emails_to_send:
-                    try:
-                        success = send_email_with_attachments(
-                            from_email=user.email,
-                            from_password=user.email_password,
-                            to_email=email_address,
-                            subject=subject,
-                            body=body,
-                            pdf_files=pdf_files,
-                            from_name=user.name
-                        )
-                        
-                        if success:
-                            print(f"DEBUG: Email sent successfully to {email_address}")
-                            
-                            # Log each email separately
-                            new_email = SentEmail(
-                                school_name=school.school_name,
-                                school_email=email_address,
-                                user_id=user_id,
-                                responded=False,
-                                followup_sent=False
-                            )
-                            db.session.add(new_email)
-                            
-                            school_sent_count += 1
-                            sent_count += 1
-                        else:
-                            errors.append(f"Failed to send to {school.school_name} ({email_address})")
-                            
-                    except Exception as e:
-                        error_msg = f"Failed to send to {school.school_name} ({email_address}): {str(e)}"
-                        print(f"DEBUG ERROR: {error_msg}")
-                        errors.append(error_msg)
-                
-                # Update school status if at least one email was sent
-                if school_sent_count > 0:
-                    school.status = 'contacted'
-                
-            except Exception as e:
-                error_msg = f"Failed to process {school.school_name}: {str(e)}"
-                print(f"DEBUG ERROR: {error_msg}")
-                errors.append(error_msg)
-        
-        # Commit after each batch to save progress
-        try:
-            db.session.commit()
-            print(f"DEBUG: Batch {batch_idx + 1} committed successfully")
-        except Exception as e:
-            print(f"DEBUG: Batch {batch_idx + 1} commit error: {str(e)}")
-            db.session.rollback()
-        
-        # Add delay between batches (except after the last batch)
-        if batch_idx < len(all_batches) - 1:
-            print("DEBUG: Waiting 3 seconds before next batch...")
-            time.sleep(3)
-    
+    schools_contacted = set()
+
+    for job, success, error in results:
+        school = job["school"]
+        if success:
+            db.session.add(SentEmail(
+                school_name=school.school_name,
+                school_email=job["to_email"],
+                user_id=user_id,
+                responded=False,
+                followup_sent=False
+            ))
+            sent_count += 1
+            schools_contacted.add(school.id)
+        else:
+            errors.append(f"Failed to send to {school.school_name} ({job['to_email']}): {error}")
+
+    for school in schools:
+        if school.id in schools_contacted:
+            school.status = 'contacted'
+
+    try:
+        db.session.commit()
+        print(f"DEBUG: Committed {sent_count} sent emails")
+    except Exception as e:
+        db.session.rollback()
+        print(f"DEBUG: Commit error: {str(e)}")
+
     return jsonify({
-        "status": f"{sent_count} emails sent successfully in {len(all_batches)} batches" if sent_count > 0 else "Failed to send emails",
+        "status": f"{sent_count} emails sent successfully" if sent_count > 0 else "Failed to send emails",
         "sent_count": sent_count,
-        "batches_processed": len(all_batches),
+        "batches_processed": 1,
         "errors": errors
     })
 
+def build_email_message(from_email, from_name, to_email, subject, body, pdf_files):
+    """Build a MIME message with PDF attachments (no network I/O)."""
+    msg = MIMEMultipart('mixed')  # Specify multipart type
+    msg['From'] = f"{from_name} <{from_email}>"
+    msg['To'] = to_email
+    msg['Subject'] = subject
+
+    # Set charset for the entire message
+    msg.set_charset('utf-8')
+
+    # Add body to email with proper encoding
+    text_part = MIMEText(body, 'plain', 'utf-8')
+    msg.attach(text_part)
+
+    # Define the path where PDFs are stored
+    pdf_directory = os.path.join(os.path.dirname(__file__), 'pdf_attachments')
+
+    # Attach PDF files
+    for pdf_file in pdf_files:
+        pdf_path = os.path.join(pdf_directory, pdf_file)
+
+        if os.path.exists(pdf_path):
+            with open(pdf_path, "rb") as attachment:
+                part = MIMEBase('application', 'pdf')
+                part.set_payload(attachment.read())
+
+            # Encode file in ASCII characters to send by email
+            encoders.encode_base64(part)
+
+            # Add header as key/value pair to attachment part
+            part.add_header(
+                'Content-Disposition',
+                f'attachment; filename="{pdf_file}"',  # Added quotes around filename
+            )
+
+            # Attach the part to message
+            msg.attach(part)
+        else:
+            print(f"WARNING: PDF file not found: {pdf_path}")
+
+    return msg
+
+
+def open_smtp_connection(from_email, from_password):
+    """Open and authenticate a single SMTP connection for reuse across many sends."""
+    server = smtplib.SMTP('smtp.gmail.com', 587)
+    server.starttls()
+    server.login(from_email, from_password)
+    return server
+
+
 def send_email_with_attachments(from_email, from_password, to_email, subject, body, pdf_files, from_name):
-    """Send email with PDF attachments using SMTP"""
+    """Send a single email with PDF attachments over its own SMTP connection."""
     try:
-        # Create message
-        msg = MIMEMultipart('mixed')  # Specify multipart type
-        msg['From'] = f"{from_name} <{from_email}>"
-        msg['To'] = to_email
-        msg['Subject'] = subject
-        
-        # Set charset for the entire message
-        msg.set_charset('utf-8')
-        
-        # Add body to email with proper encoding
-        text_part = MIMEText(body, 'plain', 'utf-8')
-        msg.attach(text_part)
-        
-        # Define the path where PDFs are stored
-        pdf_directory = os.path.join(os.path.dirname(__file__), 'pdf_attachments')
-        
-        # Attach PDF files
-        for pdf_file in pdf_files:
-            pdf_path = os.path.join(pdf_directory, pdf_file)
-            
-            if os.path.exists(pdf_path):
-                print(f"DEBUG: Attaching PDF: {pdf_file}")
-                with open(pdf_path, "rb") as attachment:
-                    part = MIMEBase('application', 'pdf')
-                    part.set_payload(attachment.read())
-                
-                # Encode file in ASCII characters to send by email    
-                encoders.encode_base64(part)
-                
-                # Add header as key/value pair to attachment part
-                part.add_header(
-                    'Content-Disposition',
-                    f'attachment; filename="{pdf_file}"',  # Added quotes around filename
-                )
-                
-                # Attach the part to message
-                msg.attach(part)
-            else:
-                print(f"WARNING: PDF file not found: {pdf_path}")
-                print(f"DEBUG: Looking for file at: {pdf_path}")
-                # List files in the directory for debugging
-                if os.path.exists(pdf_directory):
-                    files_in_dir = os.listdir(pdf_directory)
-                    print(f"DEBUG: Files in pdf_attachments directory: {files_in_dir}")
-                else:
-                    print(f"DEBUG: pdf_attachments directory does not exist at: {pdf_directory}")
-        
-        # Create SMTP session
-        server = smtplib.SMTP('smtp.gmail.com', 587)
-        server.starttls()  # Enable security
-        server.login(from_email, from_password)
-        
-        # Convert message to string and send
-        # The key fix: use as_bytes() instead of as_string() to handle Unicode properly
-        message_bytes = msg.as_bytes()
-        server.send_message(msg, from_email, [to_email])  # Use send_message instead of sendmail
-        server.quit()
-        
+        msg = build_email_message(from_email, from_name, to_email, subject, body, pdf_files)
+        server = open_smtp_connection(from_email, from_password)
+        try:
+            server.send_message(msg, from_email, [to_email])
+        finally:
+            server.quit()
         return True
-        
+
     except Exception as e:
         print(f"Error sending email with attachments: {str(e)}")
         traceback.print_exc()
         return False
+
+
+def send_emails_over_connection(from_email, from_password, from_name, jobs, delay_seconds=0.3):
+    """
+    Send multiple emails reusing a single SMTP connection (one login instead of one per email).
+    `jobs` is a list of dicts with keys: to_email, subject, body, pdf_files (plus any extra
+    caller-tracking keys, which are passed through untouched).
+    Returns a list of (job, success, error_message) tuples in the same order as `jobs`.
+    """
+    if not jobs:
+        return []
+
+    try:
+        server = open_smtp_connection(from_email, from_password)
+    except Exception as e:
+        print(f"Error opening SMTP connection: {str(e)}")
+        return [(job, False, f"SMTP login failed: {str(e)}") for job in jobs]
+
+    results = []
+    try:
+        for idx, job in enumerate(jobs):
+            try:
+                msg = build_email_message(
+                    from_email, from_name, job["to_email"], job["subject"], job["body"], job["pdf_files"]
+                )
+                server.send_message(msg, from_email, [job["to_email"]])
+                results.append((job, True, None))
+            except Exception as e:
+                print(f"Error sending to {job['to_email']}: {str(e)}")
+                results.append((job, False, str(e)))
+
+            # Small pacing delay to stay friendly with Gmail's rate limits, not a full batch stall
+            if delay_seconds and idx < len(jobs) - 1:
+                time.sleep(delay_seconds)
+    finally:
+        try:
+            server.quit()
+        except Exception:
+            pass
+
+    return results
 
 # Also update the followup email function
 @app.route("/api/send-followup", methods=["POST"])
@@ -2329,9 +2336,7 @@ def send_custom_email_bulk():
     if not schools:
         return jsonify({"error": "No valid schools found"}), 400
 
-    sent_count = 0
-    errors = []
-
+    jobs = []
     for school in schools:
         def apply_vars(text, s=school):
             return (text
@@ -2340,33 +2345,35 @@ def send_custom_email_bulk():
                 .replace('[user_name]', user.name or '')
                 .replace('[user_email]', user.email or ''))
 
-        try:
-            success = send_email_with_attachments(
-                from_email=user.email,
-                from_password=user.email_password,
-                to_email=school.email,
-                subject=apply_vars(subject),
-                body=apply_vars(message),
-                pdf_files=pdf_files,
-                from_name=user.name
-            )
+        jobs.append({
+            "school": school,
+            "to_email": school.email,
+            "subject": apply_vars(subject),
+            "body": apply_vars(message),
+            "pdf_files": pdf_files
+        })
 
-            if success:
-                new_email = SentEmail(
-                    school_name=school.school_name,
-                    school_email=school.email,
-                    user_id=user_id,
-                    responded=False,
-                    followup_sent=False
-                )
-                db.session.add(new_email)
-                school.status = 'contacted'
-                sent_count += 1
-            else:
-                errors.append(f"Failed to send to {school.school_name}")
+    # One login, one connection reused for every email in this request instead of one
+    # SMTP connection per school (see send_emails_over_connection).
+    results = send_emails_over_connection(user.email, user.email_password, user.name, jobs)
 
-        except Exception as e:
-            errors.append(f"Failed to send to {school.school_name}: {str(e)}")
+    sent_count = 0
+    errors = []
+
+    for job, success, error in results:
+        school = job["school"]
+        if success:
+            db.session.add(SentEmail(
+                school_name=school.school_name,
+                school_email=job["to_email"],
+                user_id=user_id,
+                responded=False,
+                followup_sent=False
+            ))
+            school.status = 'contacted'
+            sent_count += 1
+        else:
+            errors.append(f"Failed to send to {school.school_name}: {error}")
 
     try:
         db.session.commit()
