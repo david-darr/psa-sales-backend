@@ -1345,20 +1345,22 @@ def upload_schools_csv():
                 continue
         
         print(f"DEBUG: Processed {row_count} rows, found {len(schools_dict)} unique schools")
-        
+
+        # Fetch this user's existing school names once instead of querying per row - with a few
+        # hundred schools, one query per row (plus the autoflush it triggers against pending
+        # db.session.add() calls) is what was blowing past the request timeout.
+        existing_names = {
+            name for (name,) in db.session.query(SalesSchool.school_name).filter_by(user_id=user_id).all()
+        }
+
         # Second pass: Create database entries
         for school_key, school_data in schools_dict.items():
             try:
                 school_name = school_data['school_name']
                 emails = school_data['emails']
-                
+
                 # Check if school already exists for this user
-                existing = SalesSchool.query.filter_by(
-                    school_name=school_name,
-                    user_id=user_id
-                ).first()
-                
-                if existing:
+                if school_name in existing_names:
                     schools_skipped += 1
                     print(f"DEBUG: School '{school_name}' already exists, skipping")
                     continue
