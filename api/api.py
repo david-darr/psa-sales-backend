@@ -1594,7 +1594,10 @@ def build_email_message(from_email, from_name, to_email, subject, body, pdf_file
 
 def open_smtp_connection(from_email, from_password):
     """Open and authenticate a single SMTP connection for reuse across many sends."""
-    server = smtplib.SMTP('smtp.gmail.com', 587)
+    # A timeout is required here - without one, a stalled reply from Gmail blocks the
+    # underlying socket read forever, which gunicorn can only stop by killing the whole
+    # worker (an uncatchable SystemExit), losing the entire in-progress batch.
+    server = smtplib.SMTP('smtp.gmail.com', 587, timeout=15)
     server.starttls()
     server.login(from_email, from_password)
     return server
