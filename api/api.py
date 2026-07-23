@@ -7,6 +7,7 @@ import requests
 import re
 import json
 import time
+import html
 import imaplib
 import email
 import ssl
@@ -1525,6 +1526,22 @@ def send_email():
         "errors": errors
     })
 
+def render_body_parts(body):
+    """
+    Turn a plain-text body that may contain **bold** markers into a
+    (plain_text, html) pair - plain text has the markers stripped, html has them
+    converted to real <b> tags so bold survives in the sent email.
+    """
+    plain_body = re.sub(r'\*\*(.+?)\*\*', r'\1', body)
+
+    escaped = html.escape(body)
+    bolded = re.sub(r'\*\*(.+?)\*\*', r'<b>\1</b>', escaped)
+    with_line_breaks = bolded.replace('\n', '<br>\n')
+    html_body = f'<html><body style="font-family: sans-serif;">{with_line_breaks}</body></html>'
+
+    return plain_body, html_body
+
+
 def build_email_message(from_email, from_name, to_email, subject, body, pdf_files):
     """Build a MIME message with PDF attachments (no network I/O)."""
     msg = MIMEMultipart('mixed')  # Specify multipart type
@@ -1535,9 +1552,12 @@ def build_email_message(from_email, from_name, to_email, subject, body, pdf_file
     # Set charset for the entire message
     msg.set_charset('utf-8')
 
-    # Add body to email with proper encoding
-    text_part = MIMEText(body, 'plain', 'utf-8')
-    msg.attach(text_part)
+    # Body as plain text + HTML alternative so **bold** markers render as real bold
+    plain_body, html_body = render_body_parts(body)
+    alt_part = MIMEMultipart('alternative')
+    alt_part.attach(MIMEText(plain_body, 'plain', 'utf-8'))
+    alt_part.attach(MIMEText(html_body, 'html', 'utf-8'))
+    msg.attach(alt_part)
 
     # Define the path where PDFs are stored
     pdf_directory = os.path.join(os.path.dirname(__file__), 'pdf_attachments')
