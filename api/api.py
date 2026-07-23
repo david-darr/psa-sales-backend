@@ -85,6 +85,9 @@ db = SQLAlchemy(app)
 
 # JWT Configuration
 app.config["JWT_SECRET_KEY"] = os.getenv("JWT_SECRET_KEY")
+# Default is 15 minutes, which is too easy to hit mid-task (composing a batch email, etc.)
+# for an internal sales tool with no refresh-token flow to renew it silently.
+app.config["JWT_ACCESS_TOKEN_EXPIRES"] = timedelta(hours=12)
 jwt = JWTManager(app)
 
 # Mail Configuration
