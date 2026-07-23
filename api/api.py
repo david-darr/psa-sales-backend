@@ -1528,14 +1528,16 @@ def send_email():
 
 def render_body_parts(body):
     """
-    Turn a plain-text body that may contain **bold** markers into a
-    (plain_text, html) pair - plain text has the markers stripped, html has them
-    converted to real <b> tags so bold survives in the sent email.
+    Turn a plain-text body that may contain **bold** and/or ++larger text++ markers into a
+    (plain_text, html) pair - plain text has the markers stripped, html has them converted to
+    real <b> tags / bigger font-size spans so the formatting survives in the sent email.
     """
-    plain_body = re.sub(r'\*\*(.+?)\*\*', r'\1', body)
+    plain_body = re.sub(r'\+\+(.+?)\+\+', r'\1', body)
+    plain_body = re.sub(r'\*\*(.+?)\*\*', r'\1', plain_body)
 
     escaped = html.escape(body)
-    bolded = re.sub(r'\*\*(.+?)\*\*', r'<b>\1</b>', escaped)
+    sized = re.sub(r'\+\+(.+?)\+\+', r'<span style="font-size: 1.3em;">\1</span>', escaped)
+    bolded = re.sub(r'\*\*(.+?)\*\*', r'<b>\1</b>', sized)
     with_line_breaks = bolded.replace('\n', '<br>\n')
     html_body = f'<html><body style="font-family: sans-serif;">{with_line_breaks}</body></html>'
 
