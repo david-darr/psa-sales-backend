@@ -81,8 +81,11 @@ CORS(app,
 database_url = os.getenv("DATABASE_URL")
 if not database_url:
     raise RuntimeError("DATABASE_URL is required")
-if database_url.startswith("postgres://"):
-    database_url = "postgresql://" + database_url[len("postgres://"):]
+# SQLAlchemy 2.1 defaults to psycopg; this app installs psycopg2-binary.
+for prefix in ("postgres://", "postgresql://", "postgresql+psycopg://"):
+    if database_url.startswith(prefix):
+        database_url = "postgresql+psycopg2://" + database_url[len(prefix):]
+        break
 app.config['SQLALCHEMY_DATABASE_URI'] = database_url
 db = SQLAlchemy(app)
 
