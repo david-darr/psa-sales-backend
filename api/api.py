@@ -78,9 +78,12 @@ CORS(app,
 )
 
 # Database Configuration
-app.config['SQLALCHEMY_DATABASE_URI'] = (
-    'postgresql://postgres.dlnfvtudzyyabixedniz:Pandaplayz6!@aws-0-us-east-1.pooler.supabase.com:6543/postgres'
-)
+database_url = os.getenv("DATABASE_URL")
+if not database_url:
+    raise RuntimeError("DATABASE_URL is required")
+if database_url.startswith("postgres://"):
+    database_url = "postgresql://" + database_url[len("postgres://"):]
+app.config['SQLALCHEMY_DATABASE_URI'] = database_url
 db = SQLAlchemy(app)
 
 # JWT Configuration
@@ -285,7 +288,6 @@ def split_sheet_schools(sheet_rows):
     
     return psa_preschools, happy_feet, elementary_catholic
 
-# MOVE THESE CONSTANTS HERE - BEFORE THE FUNCTION IS CALLED
 GENERIC_NAMES = {"elementary", "preschool", "school name", "elementary school"}
 MAP_SCHOOL_CACHE = {}
 
@@ -293,22 +295,6 @@ REC_SITES = [
     {"name": "Hanson Park", "address": "22831 Hanson Park Dr, Aldie, VA 20105"},
     {"name": "Heron Overlook", "address": "20550 Heron overlook Plz, Ashburn, VA 20147"}
 ]
-
-# NOW call the function - constants are defined
-psa_preschools, happy_feet, elementary_catholic = split_sheet_schools(load_PSA_school_sheet())
-
-print(f"Loaded {len(psa_preschools)} PSA preschools")
-print(f"Loaded {len(happy_feet)} Happy Feet schools")
-print(f"Loaded {len(elementary_catholic)} Elementary/Catholic schools")
-
-# Constants
-# REC_SITES = [
-#     {"name": "Hanson Park", "address": "22831 Hanson Park Dr, Aldie, VA 20105"},
-#     {"name": "Heron Overlook", "address": "20550 Heron overlook Plz, Ashburn, VA 20147"}
-# ]
-
-# GENERIC_NAMES = {"elementary", "preschool", "school name", "elementary school"}
-# MAP_SCHOOL_CACHE = {}
 
 # ====================================================
 # UTILITY FUNCTIONS
@@ -1786,6 +1772,7 @@ def get_sent_emails():
             "responded": email.responded,
             "followup_sent": email.followup_sent,
             "has_reply_content": bool(email.reply_content),
+            "is_mine": email.user_id == user.id,
             "user_name": sender_user.name if sender_user else "Unknown"
         })
     
@@ -1884,6 +1871,7 @@ def get_email_reply_chain(email_id):
         "sent_at": email_record.sent_at,
         "reply_count": len(replies),
         "last_reply_date": email_record.last_reply_date,
+        "reply_content": email_record.reply_content,
         "replies": [
             {
                 "id": reply.id,
