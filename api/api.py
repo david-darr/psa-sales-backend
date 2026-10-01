@@ -14,6 +14,8 @@ import ssl
 import pytz
 import atexit
 import logging
+import hashlib
+import secrets
 from itertools import permutations
 from math import radians, cos, sin, sqrt, atan2
 from datetime import datetime, timedelta, timezone
@@ -33,6 +35,7 @@ import smtplib
 from flask import Flask, request, jsonify, render_template_string
 from flask_mail import Mail, Message
 from flask_sqlalchemy import SQLAlchemy
+from sqlalchemy import func
 from flask_cors import CORS
 from flask_jwt_extended import (
     JWTManager, create_access_token, jwt_required, get_jwt_identity
@@ -128,6 +131,27 @@ class User(db.Model):
     
     def check_password(self, password):
         return check_password_hash(self.password_hash, password)
+
+class EmployeeInvitation(db.Model):
+    __tablename__ = 'employee_invitations'
+    id = db.Column(db.Integer, primary_key=True)
+    email = db.Column(db.String, nullable=False)
+    token_hash = db.Column(db.String(64), unique=True, nullable=False)
+    created_by = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=False)
+    created_at = db.Column(db.DateTime, nullable=False, default=lambda: utc_now())
+    expires_at = db.Column(db.DateTime, nullable=False)
+    used_at = db.Column(db.DateTime, nullable=True)
+    revoked_at = db.Column(db.DateTime, nullable=True)
+
+def utc_now():
+    """UTC timestamp stored without timezone, matching the existing database columns."""
+    return datetime.now(timezone.utc).replace(tzinfo=None)
+
+def admin_access_error():
+    user = db.session.get(User, int(get_jwt_identity()))
+    if not user or not user.admin:
+        return jsonify({"error": "Administrator access required"}), 403
+    return None
 
 class School(db.Model):
     __tablename__ = 'schools'
@@ -959,25 +983,107 @@ www.thepsasports.com
 
 @app.route("/api/register", methods=["POST"])
 def register():
-    data = request.get_json()
-    name = data.get("name")
-    email = data.get("email")
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict):
+        return jsonify({"error": "Invalid request"}), 400
+    if not isinstance(data.get("name"), str) or not isinstance(data.get("email"), str):
+        return jsonify({"error": "Missing required fields"}), 400
+    name = data["name"].strip()
+    email = data["email"].strip().lower()
     phone = data.get("phone")
     password = data.get("password")
+    invite_token = data.get("invite_token")
     
-    if not all([name, email, password]):
+    if (not all([name, email, password, invite_token]) or
+            not isinstance(password, str) or not isinstance(invite_token, str) or
+            len(invite_token) > 256):
         return jsonify({"error": "Missing required fields"}), 400
-    
-    if User.query.filter_by(email=email).first():
+
+    token_hash = hashlib.sha256(invite_token.encode("utf-8")).hexdigest()
+    invitation = EmployeeInvitation.query.filter_by(token_hash=token_hash).with_for_update().first()
+    now = utc_now()
+    if (not invitation or invitation.email != email or invitation.used_at or
+            invitation.revoked_at or invitation.expires_at <= now):
+        return jsonify({"error": "Invalid or expired invitation"}), 403
+
+    if User.query.filter(func.lower(User.email) == email).first():
         return jsonify({"error": "Email already registered"}), 400
-    
-    # Save to database
+
     user = User(name=name, email=email, phone=phone)
     user.set_password(password)
     db.session.add(user)
+    invitation.used_at = now
+    for other in EmployeeInvitation.query.filter(
+        EmployeeInvitation.email == email,
+        EmployeeInvitation.id != invitation.id,
+        EmployeeInvitation.used_at.is_(None),
+        EmployeeInvitation.revoked_at.is_(None),
+    ).all():
+        other.revoked_at = now
     db.session.commit()
     
     return jsonify({"message": "User registered successfully"})
+
+@app.route("/api/invitations", methods=["GET"])
+@jwt_required()
+def list_invitations():
+    error = admin_access_error()
+    if error:
+        return error
+    invitations = EmployeeInvitation.query.filter(
+        EmployeeInvitation.used_at.is_(None),
+        EmployeeInvitation.revoked_at.is_(None),
+        EmployeeInvitation.expires_at > utc_now(),
+    ).order_by(EmployeeInvitation.expires_at.desc()).all()
+    return jsonify([{
+        "id": invite.id,
+        "email": invite.email,
+        "expires_at": invite.expires_at.isoformat() + "Z",
+    } for invite in invitations])
+
+@app.route("/api/invitations", methods=["POST"])
+@jwt_required()
+def create_invitation():
+    error = admin_access_error()
+    if error:
+        return error
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict) or not isinstance(data.get("email"), str):
+        return jsonify({"error": "Enter a valid employee email"}), 400
+    email = data["email"].strip().lower()
+    if not re.fullmatch(r"[^@\s]+@[^@\s]+\.[^@\s]+", email):
+        return jsonify({"error": "Enter a valid employee email"}), 400
+    if User.query.filter(func.lower(User.email) == email).first():
+        return jsonify({"error": "An account already uses this email"}), 409
+
+    token = secrets.token_urlsafe(32)
+    invite = EmployeeInvitation(
+        email=email,
+        token_hash=hashlib.sha256(token.encode("utf-8")).hexdigest(),
+        created_by=int(get_jwt_identity()),
+        expires_at=utc_now() + timedelta(days=7),
+    )
+    db.session.add(invite)
+    db.session.commit()
+    return jsonify({
+        "id": invite.id,
+        "email": invite.email,
+        "token": token,
+        "expires_at": invite.expires_at.isoformat() + "Z",
+    }), 201
+
+@app.route("/api/invitations/<int:invitation_id>", methods=["DELETE"])
+@jwt_required()
+def revoke_invitation(invitation_id):
+    error = admin_access_error()
+    if error:
+        return error
+    invite = EmployeeInvitation.query.filter_by(id=invitation_id).with_for_update().first()
+    if not invite or invite.used_at or invite.revoked_at:
+        return jsonify({"error": "Invitation not found"}), 404
+    invite.revoked_at = utc_now()
+    db.session.commit()
+    return jsonify({"message": "Invitation revoked"})
 
 @app.route("/api/login", methods=["POST"])
 def login():
@@ -1197,6 +1303,7 @@ def delete_school():
         return jsonify({"error": str(e)}), 500
 
 @app.route("/api/schools", methods=["GET"])
+@jwt_required()
 def get_schools():
     """Return all schools from the database."""
     schools = School.query.all()
@@ -1893,6 +2000,7 @@ def get_email_reply_chain(email_id):
 # ====================================================
 
 @app.route("/api/find-schools", methods=["POST"])
+@jwt_required()
 def find_schools():
     data = request.get_json()
     address = data.get("address")
@@ -1960,7 +2068,6 @@ def find_schools():
     return jsonify({
         "schools": schools,
         "location": location,
-        "google_api_key": GOOGLE_API_KEY
     })
 
 # ====================================================
@@ -1968,6 +2075,7 @@ def find_schools():
 # ====================================================
 
 @app.route("/api/route-plan", methods=["POST"])
+@jwt_required()
 def route_plan():
     """Calculate shortest route visiting all selected schools."""
     data = request.get_json()
@@ -2018,10 +2126,12 @@ def route_plan():
 # ====================================================
 
 @app.route("/api/map-schools", methods=["GET"])
+@jwt_required()
 def map_schools():
     return jsonify(MAP_SCHOOL_CACHE)
 
 @app.route("/api/refresh-map-schools", methods=["POST"])
+@jwt_required()
 def refresh_map_schools():
     global MAP_SCHOOL_CACHE
     new_sheet_rows = load_PSA_school_sheet()
@@ -2130,6 +2240,9 @@ def get_team_stats():
 @jwt_required()
 def get_all_schools():
     """Get all schools with user information (for fallback team stats)"""
+    error = admin_access_error()
+    if error:
+        return error
     try:
         # Use SQLAlchemy ORM with joins
         schools = db.session.query(SalesSchool, User).outerjoin(User, SalesSchool.user_id == User.id).all()
@@ -2162,6 +2275,9 @@ def get_all_schools():
 @jwt_required()
 def get_all_emails():
     """Get all sent emails with user information (for fallback team stats)"""
+    error = admin_access_error()
+    if error:
+        return error
     try:
         # Use SQLAlchemy ORM with joins
         emails = db.session.query(SentEmail, User).outerjoin(User, SentEmail.user_id == User.id).all()
