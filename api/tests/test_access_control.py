@@ -1,10 +1,12 @@
 """Regression checks for employee invitations and protected API routes."""
 
 import os
+import base64
 import unittest
 
 os.environ["DATABASE_URL"] = "sqlite:///:memory:"
 os.environ["JWT_SECRET_KEY"] = "local-test-key"
+os.environ.setdefault("MAIL_CREDENTIAL_KEY", base64.urlsafe_b64encode(b"0" * 32).decode())
 
 from api import api as service  # noqa: E402
 

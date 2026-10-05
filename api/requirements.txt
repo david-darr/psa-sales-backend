@@ -4,6 +4,7 @@ flask_cors
 APScheduler
 flask_mail
 flask_jwt_extended
+cryptography>=45,<51
 werkzeug
 requests
 gspread

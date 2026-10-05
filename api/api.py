@@ -57,6 +57,13 @@ from apscheduler.executors.pool import ThreadPoolExecutor
 # ====================================================
 
 load_dotenv()
+from .mail_credentials import (  # noqa: E402 - dotenv must load before key validation
+    MailCredentialUnavailable,
+    decrypt_password,
+    encrypt_password,
+    is_encrypted,
+    legacy_reads_enabled,
+)
 GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
 
 # ====================================================
@@ -92,6 +99,11 @@ for prefix in ("postgres://", "postgresql://", "postgresql+psycopg://"):
 app.config['SQLALCHEMY_DATABASE_URI'] = database_url
 db = SQLAlchemy(app)
 
+
+@app.errorhandler(MailCredentialUnavailable)
+def mail_credential_unavailable(_error):
+    return jsonify({"error": "Email connection unavailable. Contact your PSA administrator."}), 503
+
 # JWT Configuration
 app.config["JWT_SECRET_KEY"] = os.getenv("JWT_SECRET_KEY")
 # Default is 15 minutes, which is too easy to hit mid-task (composing a batch email, etc.)
@@ -122,7 +134,7 @@ class User(db.Model):
     admin = db.Column(db.Boolean, nullable=False, default=False)
     
     # Email settings for sending emails
-    email_password = db.Column(db.String, nullable=True)  # App password for Gmail
+    email_password = db.Column(db.String, nullable=True)  # Encrypted Gmail app password
     smtp_server = db.Column(db.String, default='smtp.gmail.com')
     smtp_port = db.Column(db.Integer, default=587)
 
@@ -430,9 +442,10 @@ def check_user_email_replies(user):
         print(f"DEBUG: Starting email check for {user.email}")
         
         # Connect to Gmail IMAP
+        password = user_mail_password(user)
         context = ssl.create_default_context()
         mail = imaplib.IMAP4_SSL("imap.gmail.com", 993, ssl_context=context)
-        mail.login(user.email, user.email_password)
+        mail.login(user.email, password)
         
         # Select inbox
         mail.select("inbox")
@@ -570,9 +583,10 @@ def check_user_email_replies_limited(user, max_emails_to_check=20, max_replies_t
         print(f"DEBUG: Starting LIMITED email check for {user.email}")
         
         # Connect to Gmail IMAP with timeout
+        password = user_mail_password(user)
         context = ssl.create_default_context()
         mail = imaplib.IMAP4_SSL("imap.gmail.com", 993, ssl_context=context)
-        mail.login(user.email, user.email_password)
+        mail.login(user.email, password)
         
         # Select inbox
         mail.select("inbox")
@@ -1100,7 +1114,8 @@ def login():
                 "name": user.name, 
                 "email": user.email, 
                 "phone": user.phone,
-                "admin": user.admin
+                "admin": user.admin,
+                "mail_connected": bool(user.email_password)
             }
         })
     return jsonify({"error": "Invalid credentials"}), 401
@@ -1117,7 +1132,8 @@ def profile():
         "name": user.name, 
         "email": user.email, 
         "phone": user.phone,
-        "admin": user.admin
+        "admin": user.admin,
+        "mail_connected": bool(user.email_password)
     })
 
 # ====================================================
@@ -1127,10 +1143,10 @@ def profile():
 @app.route("/api/email-settings", methods=["POST"])
 @jwt_required()
 def save_email_settings():
-    data = request.get_json()
+    data = request.get_json(silent=True) or {}
     email_password = data.get("email_password")
     
-    if not email_password:
+    if not isinstance(email_password, str) or not email_password.strip():
         return jsonify({"error": "Email password required"}), 400
     
     user_id = get_jwt_identity()
@@ -1138,11 +1154,65 @@ def save_email_settings():
     if not user:
         return jsonify({"error": "User not found"}), 404
     
-    # Save encrypted email password (you might want to encrypt this)
-    user.email_password = email_password
+    user.email_password = encrypt_password(email_password)
     db.session.commit()
     
     return jsonify({"message": "Email settings saved"})
+
+
+def mail_credential_migration_counts():
+    values = db.session.query(User.email_password).filter(User.email_password.isnot(None)).all()
+    configured = [row[0] for row in values if row[0]]
+    encrypted = 0
+    invalid = 0
+    for value in configured:
+        if is_encrypted(value):
+            try:
+                decrypt_password(value)
+                encrypted += 1
+            except MailCredentialUnavailable:
+                invalid += 1
+    return {
+        "configured": len(configured),
+        "encrypted": encrypted,
+        "invalid": invalid,
+        "legacy": len(configured) - encrypted - invalid,
+        "legacy_reads_enabled": legacy_reads_enabled(),
+    }
+
+
+@app.route("/api/mail-credential-migration", methods=["GET", "POST"])
+@jwt_required()
+def mail_credential_migration():
+    error = admin_access_error()
+    if error:
+        return error
+    if request.method == "GET":
+        return jsonify(mail_credential_migration_counts())
+
+    data = request.get_json(silent=True) or {}
+    if data.get("confirm") != "ENCRYPT_EXISTING_MAIL_PASSWORDS":
+        return jsonify({"error": "Migration confirmation required"}), 400
+
+    migrated = 0
+    try:
+        users = User.query.filter(User.email_password.isnot(None)).with_for_update().all()
+        for user in users:
+            value = user.email_password
+            if not value:
+                continue
+            if is_encrypted(value):
+                # Refuse to declare success if an existing token cannot be read.
+                decrypt_password(value)
+            else:
+                user.email_password = encrypt_password(value)
+                migrated += 1
+        db.session.commit()
+    except Exception:
+        db.session.rollback()
+        raise
+
+    return jsonify({"migrated": migrated, **mail_credential_migration_counts()})
 
 @app.route("/api/check-email-replies", methods=["POST"])
 @jwt_required()
@@ -1588,7 +1658,7 @@ def send_email():
     # One login, one connection reused for every email in this request - this is what
     # actually avoids the request timing out on large batches (previously each email
     # opened its own SMTP connection, plus a blocking 3s sleep between sub-batches).
-    results = send_emails_over_connection(user.email, user.email_password, user.name, jobs)
+    results = send_emails_over_connection(user.email, user_mail_password(user), user.name, jobs)
 
     sent_count = 0
     errors = []
@@ -1759,11 +1829,82 @@ def send_emails_over_connection(from_email, from_password, from_name, jobs, dela
 
     return results
 
-# Also update the followup email function
+FOLLOWUP_WAIT_DAYS = 7
+FOLLOWUP_SUBJECT = "Follow-Up: PSA Programs"
+
+
+def followup_due_at(email_record):
+    if not email_record.sent_at:
+        return None
+    return email_record.sent_at + timedelta(days=FOLLOWUP_WAIT_DAYS)
+
+
+def followup_eligibility_error(email_record):
+    """Use the same rule for the queue, preview, and final send."""
+    if email_record.responded:
+        return "This school has already responded"
+    if email_record.followup_sent:
+        return "Follow-up already sent"
+    due_at = followup_due_at(email_record)
+    if due_at is None or utc_now() < due_at:
+        return "Follow-up is due 7 days after the original email"
+    return None
+
+
+def user_mail_password(user):
+    """Return the usable secret only at the SMTP/IMAP boundary."""
+    return decrypt_password(user.email_password)
+
+
+def followup_message(user, original_email):
+    """Render the exact message used by both preview and SMTP send."""
+    schools = SalesSchool.query.filter_by(
+        school_name=original_email.school_name, user_id=user.id
+    ).all()
+    school = next(
+        (item for item in schools if original_email.school_email in item.get_all_emails()),
+        None,
+    )
+    if school and school.school_type == 'preschool':
+        template = PRESCHOOL_FOLLOWUP_TEMPLATE
+    elif school and school.school_type == 'private':
+        template = PRIVATE_SCHOOL_FOLLOWUP_TEMPLATE
+    else:
+        template = ELEMENTARY_FOLLOWUP_TEMPLATE
+    return render_template_string(
+        template,
+        school_name=original_email.school_name,
+        user_name=user.name,
+        user_email=user.email,
+    )
+
+
+@app.route("/api/followup-preview/<int:email_id>", methods=["GET"])
+@jwt_required()
+def followup_preview(email_id):
+    user_id = get_jwt_identity()
+    user = db.session.get(User, int(user_id))
+    original_email = SentEmail.query.filter_by(id=email_id, user_id=user_id).first()
+    if not user or not original_email:
+        return jsonify({"error": "Email not found"}), 404
+    error = followup_eligibility_error(original_email)
+    if error:
+        return jsonify({"error": error}), 409
+    return jsonify({
+        "email_id": original_email.id,
+        "school_name": original_email.school_name,
+        "to_email": original_email.school_email,
+        "subject": FOLLOWUP_SUBJECT,
+        "body": followup_message(user, original_email),
+        "sent_at": original_email.sent_at.isoformat(),
+        "due_at": followup_due_at(original_email).isoformat(),
+    })
+
+
 @app.route("/api/send-followup", methods=["POST"])
 @jwt_required()
 def send_followup():
-    data = request.get_json()
+    data = request.get_json(silent=True) or {}
     email_id = data.get("email_id")
     
     if not email_id:
@@ -1775,43 +1916,26 @@ def send_followup():
         return jsonify({"error": "User not connected with email"}), 400
 
     # Get the original email record
-    original_email = SentEmail.query.filter_by(id=email_id, user_id=user_id).first()
+    # Hold this row until the send result is recorded so a second request cannot
+    # send the same follow-up while the first SMTP call is still in flight.
+    original_email = SentEmail.query.filter_by(id=email_id, user_id=user_id).with_for_update().first()
     if not original_email:
         return jsonify({"error": "Email not found"}), 404
 
-    if original_email.followup_sent:
-        return jsonify({"error": "Follow-up already sent"}), 400
+    error = followup_eligibility_error(original_email)
+    if error:
+        return jsonify({"error": error}), 409
 
-    # Get the school to determine type
-    school = SalesSchool.query.filter_by(
-        school_name=original_email.school_name,
-        email=original_email.school_email,
-        user_id=user_id
-    ).first()
-    
-    # Choose followup template based on school type
-    if school and school.school_type == 'preschool':
-        followup_template = PRESCHOOL_FOLLOWUP_TEMPLATE
-    elif school and school.school_type == 'private':
-        followup_template = PRIVATE_SCHOOL_FOLLOWUP_TEMPLATE
-    else:  # elementary
-        followup_template = ELEMENTARY_FOLLOWUP_TEMPLATE
+    followup_body = followup_message(user, original_email)
 
-    # Create follow-up email body
-    followup_body = render_template_string(
-        followup_template,
-        school_name=original_email.school_name,
-        user_name=user.name,
-        user_email=user.email
-    )
-
+    password = user_mail_password(user)
     try:
         # Use the same send_email_with_attachments function that works for regular emails
         success = send_email_with_attachments(
             from_email=user.email,
-            from_password=user.email_password,
+            from_password=password,
             to_email=original_email.school_email,
-            subject="Follow-Up: PSA Programs",
+            subject=FOLLOWUP_SUBJECT,
             body=followup_body,
             pdf_files=[],  # No attachments for follow-ups
             from_name=user.name
@@ -1872,6 +1996,7 @@ def get_sent_emails():
         # Get user name for admin view
         sender_user = User.query.get(email.user_id) if email.user_id else None
         
+        due_at = followup_due_at(email)
         email_data.append({
             "id": email.id,
             "school_name": email.school_name,
@@ -1879,6 +2004,8 @@ def get_sent_emails():
             "sent_at": email.sent_at.isoformat(),
             "sent_at_formatted": email.sent_at.strftime("%b %d, %Y"),
             "days_ago": days_ago,
+            "followup_due_at": due_at.isoformat() if due_at else None,
+            "followup_eligible": email.user_id == user.id and followup_eligibility_error(email) is None,
             "responded": email.responded,
             "followup_sent": email.followup_sent,
             "has_reply_content": bool(email.reply_content),
@@ -2337,11 +2464,12 @@ def send_custom_reply():
     if not email_record:
         return jsonify({"error": "Email record not found"}), 404
 
+    password = user_mail_password(user)
     try:
         # Send the custom reply
         success = send_email_with_attachments(
             from_email=user.email,
-            from_password=user.email_password,
+            from_password=password,
             to_email=to_email,
             subject=subject,
             body=message,
@@ -2403,10 +2531,11 @@ def send_custom_email():
             .replace('[user_name]', user.name or '')
             .replace('[user_email]', user.email or ''))
 
+    password = user_mail_password(user)
     try:
         success = send_email_with_attachments(
             from_email=user.email,
-            from_password=user.email_password,
+            from_password=password,
             to_email=to_email,
             subject=apply_vars(subject),
             body=apply_vars(message),
@@ -2492,7 +2621,7 @@ def send_custom_email_bulk():
 
     # One login, one connection reused for every email in this request instead of one
     # SMTP connection per school (see send_emails_over_connection).
-    results = send_emails_over_connection(user.email, user.email_password, user.name, jobs)
+    results = send_emails_over_connection(user.email, user_mail_password(user), user.name, jobs)
 
     sent_count = 0
     errors = []
