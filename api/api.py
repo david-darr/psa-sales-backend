@@ -2141,11 +2141,20 @@ def find_schools():
     elif re.fullmatch(r"[a-zA-Z ]+", address.strip()):
         address = f"{address.strip()} USA"
 
-    # Get normalized names of schools we already do business with - NOW INCLUDING ELEMENTARY
-    happy_feet_names = set([normalize_name(s["name"]) for s in happy_feet])
-    psa_names = set([normalize_name(s["name"]) for s in psa_preschools])
-    elementary_names = set([normalize_name(s["name"]) for s in elementary_catholic])  # NEW
-    excluded_names = happy_feet_names | psa_names | elementary_names  # Updated to include elementary
+    # These lists are loaded on demand so a Sheets outage cannot stop the API
+    # worker from starting. They are not module-level variables.
+    try:
+        sheet_rows = load_PSA_school_sheet()
+        psa_preschools, happy_feet, elementary_catholic = split_sheet_schools(sheet_rows)
+    except Exception:
+        app.logger.exception("Could not load partner schools for Finder")
+        return jsonify({"error": "Partner school list is temporarily unavailable. Try again shortly."}), 503
+
+    excluded_names = {
+        normalize_name(school["name"])
+        for group in (psa_preschools, happy_feet, elementary_catholic)
+        for school in group
+    }
 
     # Geocode the address
     lat, lng = geocode_address(address)
