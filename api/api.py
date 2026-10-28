@@ -3104,6 +3104,9 @@ register_outreach_routes(app, db, _sys.modules[__name__])
 from .taskbar_sync import register_taskbar_sync  # noqa: E402
 register_taskbar_sync(app, db, User, SalesTask)
 
+from .agent_api import register_agent_api  # noqa: E402
+AgentApiKey, AgentApiAudit = register_agent_api(app, db, User, utc_now)
+
 if __name__ == "__main__":
     with app.app_context():
         db.create_all()
