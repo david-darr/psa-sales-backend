@@ -216,6 +216,47 @@ def register_crm_routes(app, db, User, School, SentEmail, Task, Activity, serial
         db.session.commit()
         return jsonify(updated=changed)
 
+    @app.post('/api/crm/schools/delete')
+    @jwt_required()
+    def crm_delete_schools():
+        """Delete schools: reps only their own, administrators any. All or nothing."""
+        user = current_user()
+        if not user:
+            return jsonify(error='User not found'), 404
+        data = request.get_json(silent=True)
+        ids = data.get('ids') if isinstance(data, dict) else None
+        if (not isinstance(ids, list) or not ids or len(ids) > 100
+                or any(type(item) is not int or item < 1 for item in ids)):
+            return jsonify(error='Select between 1 and 100 schools'), 400
+        ids = set(ids)
+        rows = School.query.filter(School.id.in_(ids)).with_for_update().all()
+        if len(rows) != len(ids):
+            return jsonify(error='One or more schools are unavailable'), 404
+        if any(not user.admin and row.user_id != user.id for row in rows):
+            return jsonify(error='You can only delete schools you own'), 403
+        tables = db.metadata.tables
+        recipients = tables.get('outreach_recipients')
+        if recipients is not None:
+            busy = db.session.execute(recipients.select().with_only_columns(recipients.c.school_id).where(
+                recipients.c.school_id.in_(ids), recipients.c.status.in_(('queued', 'sending'))).limit(1)).first()
+            if busy:
+                return jsonify(error='A selected school is in an outreach batch that is still sending. '
+                                     'Wait for it to finish, then try again.'), 409
+            db.session.execute(recipients.update().where(recipients.c.school_id.in_(ids)).values(school_id=None))
+        # Keep sent mail history and tasks; they simply lose the school link.
+        SentEmail.query.filter(SentEmail.sales_school_id.in_(ids)).update(
+            {SentEmail.sales_school_id: None}, synchronize_session=False)
+        Task.query.filter(Task.school_id.in_(ids)).update(
+            {Task.school_id: None, Task.version: Task.version + 1}, synchronize_session=False)
+        Activity.query.filter(Activity.sales_school_id.in_(ids)).delete(synchronize_session=False)
+        if 'commission_splits' in tables:
+            splits = tables['commission_splits']
+            db.session.execute(splits.delete().where(splits.c.sales_school_id.in_(ids)))
+        names = [row.school_name for row in rows]
+        School.query.filter(School.id.in_(ids)).delete(synchronize_session=False)
+        db.session.commit()
+        return jsonify(deleted=len(names), names=names)
+
     @app.route('/api/crm/tasks', methods=['GET', 'POST'])
     @jwt_required()
     def crm_tasks():
