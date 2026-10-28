@@ -17,24 +17,34 @@ Frontend: `src/SalesAdmin.jsx`, `src/components/JoinLinks.jsx`, `src/lib/preview
 
 ## Verified locally
 
-- Backend: 143 tests pass (`python -m pytest api/tests -q --disable-warnings`), including 8 new ones for commissions, closes, join links and login.
+- Backend: 187 tests pass (`python -m pytest api/tests -q --disable-warnings`), covering commissions, closes, join links, login, the Taskbar sync, the agent API and the audit importer. The Node MCP bridge tests pass (`node --test integrations/psa-mcp.test.mjs`).
 - Load: `api/tests/load_outreach.py` 49/49 against a throwaway Postgres, including 30 reps sending at once (web p95 44 ms, no duplicate emails).
-- Migration applied twice to a throwaway Postgres without errors. Reset run on seeded data: only administrators remain, the geocode cache is kept, and it refuses to run if no administrator exists.
+- All three new migrations applied twice to a throwaway Postgres without errors. The reset was run on seeded data with and without the Taskbar sync tables: only administrators remain, the geocode cache is kept, and it refuses to run if no administrator exists.
 - Frontend: lint (0 errors), build, employee and admin demo checks. In the browser: Sales admin ownership and commissions, a 50/50 split at 12% and 7% on $10,000 showing $600 and $350, reps redirected away from `/admin`, and a full join-link sign-up against the local backend landing on the checklist.
+- Kairos PSA Command tab (`kairos-forge` branch `feature/psa-command-tab`): 14 tab tests and 67 tab-gallery tests pass. Taskbar side of the sync: `scripts/psa-sync.test.mjs` and `scripts/agent-api.test.mjs` pass.
 
-Not verified: production deploy, a real Gmail send after the reset.
+Not verified: production deploy, a real Gmail send after the reset, the Taskbar Edge Functions on Supabase.
 
 ## Release order
 
+Merged into the release branches: backend `feature/psa-sales-platform` (launch admin, `feature/taskbar-sync`, `feature/agent-api`) and frontend `design/psa-sales-platform` (launch UI, `feature/taskbar-sync-refresh`, `feature/agent-keys-settings`). The Taskbar sync ships switched off and the agent API is ready but unused until someone creates a key.
+
 1. **Back up** the Supabase database (Dashboard > Database > Backups, or `pg_dump`).
-2. **Apply** `api/migrations/20261029_launch_admin.sql` (additive, safe to rerun).
-3. **Deploy backend** (push to `main` of the backend repo; Render deploys). Check `/api/join-links/check` answers `{"valid": false}` for a dummy token.
-4. **Deploy frontend** (push to `main`; Vercel deploys).
+2. **Apply** `api/migrations/20261029_launch_admin.sql` and `api/migrations/20261030_agent_api_keys.sql` (additive, safe to rerun).
+3. **Deploy backend**: merge `feature/psa-sales-platform` into `main` and push; Render deploys. Leave `TASKBAR_SYNC_ENABLED` unset. Check `/api/join-links/check` answers `{"valid": false}` for a dummy token.
+4. **Deploy frontend**: merge `design/psa-sales-platform` into `main` and push; Vercel deploys.
 5. **Confirm who stays admin.** The reset keeps only accounts with `admin = true`. Today that is David Darr and Christopher Garabito. Grant admin on the Team page first to anyone else who must keep their login (for example Ricky), or they will need to sign up again.
 6. **Run the reset** `api/maintenance/20261029_launch_reset.sql` in the SQL editor. Read the preview query at the top first. It deletes every school, email, reply, thread, task, activity, outreach batch, map snapshot, invitation, join link and non-admin account.
-7. **Import the new school list**: Outreach > Add tab > upload CSV (columns `school_name`, `email`, optional `contact_name`, `phone`, `address`, `school_type`). Uploaded schools belong to the uploader; use Schools bulk select > Assign owner to hand them to reps once they have joined.
-8. **Create a sign-up link** and post it to the team.
-9. **Smoke test** with one rep account: sign up, connect Gmail, one single-recipient send to an internal address, record a test close in Sales admin, then delete the test data.
+7. **Apply** `api/migrations/20261030_taskbar_sync.sql` (the sync stays off until its env vars are set).
+8. **Create a sign-up link** and post it to the team (rep instructions below).
+9. **Import the school audit** once reps have joined (re-running later moves schools to reps who join afterwards):
+   ```powershell
+   python -m api.maintenance.import_school_audit audit.xlsx --fallback-owner <admin email>
+   python -m api.maintenance.import_school_audit audit.xlsx --fallback-owner <admin email> --apply
+   ```
+   Run it with the production `DATABASE_URL` in your own environment. The first command is a dry run that lists stage counts and any rep names without an account. Current clients become Active clients (closed by their rep), schools in contact become Contacted, and stages are never downgraded. Smaller lists can still go through Outreach > Add > upload CSV.
+10. **Smoke test** with one rep account: sign up, connect Gmail, one single-recipient send to an internal address, record a test close in Sales admin, then delete the test data.
+11. **Later, when ready:** Taskbar sync (see `docs/TASKBAR_SYNC.md`; Taskbar's agent API must be deployed first) and the Kairos PSA Command tab (see `docs/AGENT_API.md` and `tabs/psa/README.md` in kairos-forge).
 
 ## Rep instructions (paste into the team chat)
 
