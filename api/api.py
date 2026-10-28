@@ -3101,6 +3101,9 @@ import sys as _sys
 from .outreach import register_outreach_routes
 register_outreach_routes(app, db, _sys.modules[__name__])
 
+from .taskbar_sync import register_taskbar_sync  # noqa: E402
+register_taskbar_sync(app, db, User, SalesTask)
+
 if __name__ == "__main__":
     with app.app_context():
         db.create_all()
