@@ -55,6 +55,14 @@ class FollowupTests(unittest.TestCase):
 
     def setUp(self):
         self.records = []
+        state = service.db.session.get(service.MailSyncState, self.owner.id)
+        if state is None:
+            state = service.MailSyncState(user_id=self.owner.id, last_uid=0, pending_count=0)
+            service.db.session.add(state)
+        state.last_success_at = service.utc_now()
+        state.pending_count = 0
+        state.last_error = None
+        service.db.session.commit()
 
     def tearDown(self):
         for record in self.records:

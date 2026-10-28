@@ -73,7 +73,9 @@ class MailCredentialTests(unittest.TestCase):
         self.staff.email_password = service.encrypt_password("imap-test-password")
         service.db.session.commit()
         with patch.object(service.imaplib, "IMAP4_SSL") as imap:
-            imap.return_value.search.return_value = ("OK", [b""])
+            imap.return_value.select.return_value = ("OK", [b"0"])
+            imap.return_value.response.return_value = ("UIDVALIDITY", [b"123"])
+            imap.return_value.uid.return_value = ("OK", [b""])
             self.assertEqual(service.check_user_email_replies_limited(self.staff), 0)
             imap.return_value.login.assert_called_once_with(
                 self.staff.email, "imap-test-password"
