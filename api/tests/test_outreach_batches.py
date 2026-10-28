@@ -131,7 +131,8 @@ class EligibilityTests(OutreachBase):
         self.assertNotIn(emailed.id, by_id)
         self.assertEqual(set(by_id[ok.id]), {
             'school_id', 'school_name', 'email', 'contact_name', 'status', 'owner_id', 'owner_name',
-            'last_contacted_at', 'days_since_contact', 'followup_due_at', 'eligible', 'blockers'})
+            'last_contacted_at', 'days_since_contact', 'followup_due_at', 'followups_sent',
+            'eligible', 'blockers'})
         self.assertTrue(by_id[ok.id]['eligible'])
         self.assertEqual(by_id[ok.id]['blockers'], [])
         self.assertEqual(by_id[blank.id]['blockers'], ['missing_email'])
@@ -160,14 +161,19 @@ class EligibilityTests(OutreachBase):
         answered = self.school('Answered School')
         self.sent_email(answered, 10, responded=True)
         done = self.school('Done School')
-        self.sent_email(done, 10, followup_sent=True)
+        self.sent_email(done, 10, followup_sent=True, followup_count=2)
+        second = self.school('Second Due School')
+        self.sent_email(second, 8, followup_sent=True)  # older row: flag only, no count
+        not_yet = self.school('Second Not Due School')
+        self.sent_email(not_yet, 5, followup_sent=True, followup_count=1)
         stale = self.school('Stale School')
         self.sent_email(stale, 120)
         closed = self.school('Closed Due School', status='not_interested')
         self.sent_email(closed, 9)
         data = self.recipients(self.owner, kind='followup')
         by_id = {item['school_id']: item for item in data['items']}
-        self.assertEqual(set(by_id), {due.id, closed.id})
+        self.assertEqual(set(by_id), {due.id, closed.id, second.id})
+        self.assertEqual(by_id[second.id]['followups_sent'], 1)
         self.assertTrue(by_id[due.id]['eligible'])
         self.assertEqual(by_id[due.id]['days_since_contact'], 8)
         self.assertIsNotNone(by_id[due.id]['followup_due_at'])
@@ -788,3 +794,85 @@ class BackwardCompatibilityTests(OutreachBase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class AutoFollowupTests(OutreachBase):
+    """Day-3 and day-7 follow-ups sent by the scheduler, with SMTP faked and replies checked first."""
+
+    def setUp(self):
+        super().setUp()
+        ready = {'ready': True, 'replies_found': 0, 'messages_checked': 0, 'pending_count': 0}
+        self.sync_calls = []
+
+        def fake_sync(user, *args, **kwargs):
+            self.sync_calls.append(user.id)
+            service.db.session.merge(service.MailSyncState(
+                user_id=user.id, last_success_at=service.utc_now(), last_checked_at=service.utc_now(),
+                pending_count=0))
+            service.db.session.commit()
+            return dict(ready)
+        patcher = patch.object(service, 'sync_user_mailbox', side_effect=fake_sync)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        # The job runs inside its own app context; keep the test's session usable afterwards.
+        remove = patch.object(service.db.session, 'remove')
+        remove.start()
+        self.addCleanup(remove.stop)
+
+    def run_job(self, force_hours=True):
+        result = outreach.run_auto_followups(service.app, force_hours=force_hours)
+        self.run_workers()
+        return result
+
+    def test_day_three_then_day_seven_then_nothing(self):
+        school = self.school('Maple School')
+        record = self.sent_email(school, 3.1)
+        fresh = self.school('Fresh School')
+        self.sent_email(fresh, 1)
+
+        self.assertEqual(self.run_job()['queued'], 1)
+        self.assertEqual(self.fake.sent, [school.email])
+        self.assertEqual(record.followup_count, 1)
+        self.assertIn(self.owner.id, self.sync_calls)  # replies were checked before sending
+
+        self.assertEqual(self.run_job()['queued'], 0)  # follow-up 2 is not due until day 7
+        record.sent_at = service.utc_now() - timedelta(days=7.1)
+        for message in service.SentMessage.query.filter_by(sent_email_id=record.id):
+            message.sent_at = service.utc_now() - timedelta(days=4)  # follow-up 1 went out on day 3
+        service.db.session.commit()
+        self.assertEqual(self.run_job()['queued'], 1)
+        self.assertEqual(record.followup_count, 2)
+        self.assertIn('one last time', self.fake.messages[-1].as_string())
+
+        record.sent_at = service.utc_now() - timedelta(days=20)
+        service.db.session.commit()
+        self.assertEqual(self.run_job()['queued'], 0)
+        self.assertEqual(len(self.fake.sent), 2)
+
+    def test_replied_closed_and_outside_hours_are_left_alone(self):
+        answered = self.school('Answered School')
+        self.sent_email(answered, 4, responded=True)
+        closed = self.school('Closed School', status='not_interested')
+        self.sent_email(closed, 4)
+        due = self.school('Due School')
+        self.sent_email(due, 4)
+        with patch.object(outreach, 'in_sending_hours', return_value=False):
+            self.assertEqual(self.run_job(force_hours=False)['queued'], 0)
+        self.assertEqual(self.fake.sent, [])
+        self.assertEqual(self.run_job()['queued'], 1)
+        self.assertEqual(self.fake.sent, [due.email])
+
+    def test_unsynced_inbox_and_kill_switch_send_nothing(self):
+        due = self.school('Due School')
+        self.sent_email(due, 4)
+        with patch.object(service, 'sync_user_mailbox', return_value={'ready': False, 'pending_count': 50}):
+            self.assertEqual(self.run_job()['queued'], 0)
+        with patch.dict(os.environ, {'AUTO_FOLLOWUPS_ENABLED': 'false'}):
+            self.assertEqual(self.run_job()['queued'], 0)
+        self.assertEqual(self.fake.sent, [])
+
+    def test_sending_hours_are_weekdays_nine_to_five_eastern(self):
+        from datetime import datetime, timezone
+        self.assertTrue(outreach.in_sending_hours(datetime(2026, 10, 29, 14, 0, tzinfo=timezone.utc)))   # Thu 10am ET
+        self.assertFalse(outreach.in_sending_hours(datetime(2026, 10, 29, 23, 0, tzinfo=timezone.utc)))  # Thu 7pm ET
+        self.assertFalse(outreach.in_sending_hours(datetime(2026, 10, 31, 15, 0, tzinfo=timezone.utc)))  # Saturday

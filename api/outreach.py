@@ -15,14 +15,18 @@ import os
 import threading
 import time
 import uuid
-from datetime import timedelta
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
+
+import pytz
 
 from flask import current_app, jsonify, request
 from flask_jwt_extended import get_jwt_identity, jwt_required
 from itsdangerous import BadSignature
-from sqlalchemy import case, exists, func, or_, select, update
+from sqlalchemy import case, exists, func, or_, select, text, update
 from sqlalchemy.orm import aliased
+
+from .crm import followup_due_filter
 
 log = logging.getLogger(__name__)
 
@@ -273,9 +277,9 @@ def compute_blockers(kind, row, viewer_id, in_flight=frozenset()):
         blockers.add('recently_contacted')
     if kind == 'followup':
         # The follow-up must continue the original rep's own thread with the same rules as /api/send-followup.
-        if (latest is None or latest.followup_sent or latest.user_id != school.user_id
-                or latest.sent_at is None
-                or current < latest.sent_at + timedelta(days=svc.FOLLOWUP_WAIT_DAYS)
+        due_at = svc.followup_due_at(latest) if latest is not None else None
+        if (latest is None or due_at is None or latest.user_id != school.user_id
+                or current < due_at
                 or latest.sent_at < current - timedelta(days=svc.FOLLOWUP_MAX_AGE_DAYS)):
             blockers.add('not_due')
     if not has_mailbox:
@@ -552,7 +556,8 @@ def skip_reason(batch, recipient, school):
         return 'unsubscribed'
     if batch.kind == 'followup':
         original = db.session.get(svc.SentEmail, recipient.followup_of_email_id) if recipient.followup_of_email_id else None
-        if original is None or original.followup_sent:
+        due_at = svc.followup_due_at(original) if original is not None else None
+        if due_at is None or now() < due_at:
             return 'not_due'
         if original.responded:
             return 'replied'
@@ -656,7 +661,7 @@ def _process_recipient(batch, user_id, recipient, sender, quota):
 def _record_success(batch, user_id, recipient, school, original, job):
     if batch.kind == 'followup' and original is not None:
         original = db.session.get(svc.SentEmail, original.id)
-        original.followup_sent = True
+        svc.mark_followup_sent(original)
         svc.record_outbound_message(original, job.get('message_id'), recipient.subject, 'followup')
         sent_email = original
     else:
@@ -672,6 +677,163 @@ def _record_success(batch, user_id, recipient, school, original, job):
         sent_email_id=sent_email.id, status='sent', sent_at=now(), error=None))
     _touch(batch.id)
     db.session.commit()
+
+
+def queue_batch(user, options, token=None):
+    """Create one outreach batch for this user. Returns (payload, http_status, batch or None).
+
+    Shared by the Outreach screen and the automatic follow-up job so both apply the same rules.
+    """
+    kind = options['kind']
+    if kind == 'followup' and not svc.mail_sync_status(user.id)['ready']:
+        return dict(error='Check your inbox before sending follow-ups', code='inbox_not_synced'), 409, None
+    # Serialize this user's batch creation so two requests cannot both see a school as free.
+    db.session.query(svc.User.id).filter(svc.User.id == user.id).with_for_update().first()
+    rows = owned_rows(user, options['ids'])
+    if rows is None:
+        return dict(error='Send only to schools assigned to you'), 403, None
+
+    accepted, skipped = [], []
+    busy = in_flight_school_ids(row[0].id for row in rows)
+    for row in rows:
+        blockers = compute_blockers(kind, row, user.id, busy)
+        if blockers:
+            skipped.append((row, blockers[0]))
+        else:
+            accepted.append(row)
+
+    contents = {}
+    for row in accepted:
+        school, latest = row[0], row[1]
+        contents[school.id] = build_content(
+            kind, user, school, latest, options['subject'], options['body'], options['attachments'])
+    if token is not None:
+        try:
+            review = svc.outreach_review_signer().loads(token, max_age=900)
+        except BadSignature:
+            return dict(error='Your message review expired. Review the messages again.'), 409, None
+        prints = review.get('fingerprints', {})
+        if review.get('uid') != user.id or any(
+                prints.get(f'{row[0].id}:{chosen_email(row[0], row[1], kind)}')
+                != fingerprint(chosen_email(row[0], row[1], kind), contents[row[0].id])
+                for row in accepted):
+            return dict(error='A recipient or message changed. Review the messages again before sending.'), 409, None
+
+    limits = limits_for(user)
+    if accepted and limits['remaining'] <= 0:
+        return dict(error='Daily sending limit reached', code='daily_limit', **limits), 429, None
+    allowed = accepted[:limits['remaining']]
+    skipped.extend((row, 'daily_limit') for row in accepted[limits['remaining']:])
+    if not allowed:
+        return dict(error='No eligible recipients', code='no_eligible_recipients',
+                       skipped=[{'school_id': row[0].id, 'reason': reason} for row, reason in skipped]), 400, None
+
+    batch = OutreachBatch(user_id=user.id, kind=kind, status='queued', subject=options['subject'],
+                          attachments=bool(options['attachments']), worker_token=str(uuid.uuid4()))
+    db.session.add(batch)
+    db.session.flush()
+    skip_by_id = {row[0].id: reason for row, reason in skipped}
+    allowed_ids = {row[0].id for row in allowed}
+    for position, row in enumerate(rows):
+        school, latest = row[0], row[1]
+        if school.id in allowed_ids:
+            content = contents[school.id]
+            db.session.add(OutreachRecipient(
+                batch_id=batch.id, position=position, school_id=school.id, school_name=school.school_name,
+                email=chosen_email(school, latest, kind), status='queued', subject=content['subject'],
+                body=content['body'], attachments=json.dumps(content['pdf_files']),
+                followup_of_email_id=latest.id if kind == 'followup' and latest is not None else None))
+        else:
+            db.session.add(OutreachRecipient(
+                batch_id=batch.id, position=position, school_id=school.id, school_name=school.school_name,
+                email=chosen_email(school, latest, kind), status='skipped', error=skip_by_id[school.id]))
+    db.session.commit()
+    return dict(batch_id=batch.id, status='queued', total=len(rows),
+                skipped=[{'school_id': row[0].id, 'reason': reason} for row, reason in skipped]), 202, batch
+
+
+# ---------------------------------------------------------------------------
+# Automatic follow-ups
+# ---------------------------------------------------------------------------
+
+AUTO_FOLLOWUP_LOCK_KEY = 864_002_031
+SENDING_TIME_ZONE = 'America/New_York'
+
+
+def auto_followups_enabled():
+    return os.getenv('AUTO_FOLLOWUPS_ENABLED', 'true').strip().lower() != 'false'
+
+
+def in_sending_hours(moment=None):
+    """Weekdays 9am-5pm Eastern: schools read mail then, and nobody gets a 3am follow-up."""
+    local = (moment or datetime.now(timezone.utc)).astimezone(pytz.timezone(SENDING_TIME_ZONE))
+    return local.weekday() < 5 and 9 <= local.hour < 17
+
+
+def due_followup_school_ids(user):
+    S = svc.SalesSchool
+    current = now()
+    query, Latest, _agg = school_rows_query()
+    rows = query.filter(
+        S.user_id == user.id, Latest.id.isnot(None), Latest.responded.isnot(True),
+        Latest.user_id == S.user_id, followup_due_filter(Latest, current),
+        Latest.sent_at >= current - timedelta(days=svc.FOLLOWUP_MAX_AGE_DAYS),
+    ).with_entities(S.id).order_by(Latest.sent_at.asc(), S.id).limit(MAX_BATCH_SCHOOLS).all()
+    return [school_id for (school_id,) in rows]
+
+
+def _auto_followups_for(app, user):
+    """Check replies first, then queue whatever is due. Returns the number queued."""
+    status = None
+    for _ in range(3):  # a large backlog can need several bounded passes
+        status = svc.sync_user_mailbox(user)
+        if status['ready']:
+            break
+    if not status or not status['ready']:
+        return 0
+    ids = due_followup_school_ids(user)
+    if not ids:
+        return 0
+    payload, code, batch = queue_batch(user, {'ids': ids, 'kind': 'followup', 'subject': None,
+                                              'body': None, 'attachments': None})
+    if batch is None:
+        db.session.rollback()
+        if code not in (400, 429):  # nothing eligible or daily limit: normal, try again later
+            log.warning('Automatic follow-ups not queued for user %s: %s', user.id, payload.get('error'))
+        return 0
+    start_worker(app, batch.id, batch.worker_token)
+    return code == 202 and payload['total'] - len(payload['skipped']) or 0
+
+
+def run_auto_followups(app, force_hours=False):
+    """Queue due day-3 and day-7 follow-ups for every rep with a connected mailbox.
+
+    Safe to call from every web process: a Postgres advisory lock lets one run at a time.
+    """
+    with app.app_context():
+        if not auto_followups_enabled() or (not force_hours and not in_sending_hours()):
+            return {'queued': 0, 'skipped': 'outside sending hours or disabled'}
+        lock = None
+        if db.engine.dialect.name == 'postgresql':
+            lock = db.engine.connect()
+            if not lock.execute(text('SELECT pg_try_advisory_lock(:k)'), {'k': AUTO_FOLLOWUP_LOCK_KEY}).scalar():
+                lock.close()
+                return {'queued': 0, 'skipped': 'another process is running follow-ups'}
+        queued = 0
+        try:
+            users = svc.User.query.filter(svc.User.email_password.isnot(None)).order_by(svc.User.id).all()
+            for user in users:
+                try:
+                    queued += _auto_followups_for(app, user)
+                except Exception:
+                    db.session.rollback()
+                    log.exception('Automatic follow-ups failed for user %s', user.id)
+        finally:
+            if lock is not None:
+                lock.execute(text('SELECT pg_advisory_unlock(:k)'), {'k': AUTO_FOLLOWUP_LOCK_KEY})
+                lock.close()
+            db.session.remove()
+        return {'queued': queued}
 
 
 # ---------------------------------------------------------------------------
@@ -726,9 +888,8 @@ def register_outreach_routes(app, database, service):
             order = (S.school_name.asc(), S.id)
         elif kind == 'followup':
             query = query.filter(
-                Latest.id.isnot(None), Latest.responded.isnot(True), Latest.followup_sent.isnot(True),
-                Latest.user_id == S.user_id,
-                Latest.sent_at <= current - timedelta(days=svc.FOLLOWUP_WAIT_DAYS),
+                Latest.id.isnot(None), Latest.responded.isnot(True),
+                Latest.user_id == S.user_id, followup_due_filter(Latest, current),
                 Latest.sent_at >= current - timedelta(days=svc.FOLLOWUP_MAX_AGE_DAYS))
             order = (Latest.sent_at.asc(), S.id)
         else:
@@ -747,8 +908,8 @@ def register_outreach_routes(app, database, service):
                 'status': school.status, 'owner_id': school.user_id, 'owner_name': row[6],
                 'last_contacted_at': iso(last_contact),
                 'days_since_contact': (current - last_contact).days if last_contact else None,
-                'followup_due_at': iso(latest.sent_at + timedelta(days=svc.FOLLOWUP_WAIT_DAYS))
-                if latest is not None and latest.sent_at else None,
+                'followup_due_at': iso(svc.followup_due_at(latest)) if latest is not None else None,
+                'followups_sent': svc.followup_stage(latest) if latest is not None else 0,
                 'eligible': not blockers, 'blockers': blockers,
             })
         return jsonify(items=items, total=total, page=page, per_page=per_page)
@@ -778,73 +939,10 @@ def register_outreach_routes(app, database, service):
             return jsonify(error='User not found'), 404
         if not user.email_password:
             return jsonify(error='Email settings not configured', code='no_mailbox'), 400
-        kind = options['kind']
-        if kind == 'followup' and not svc.mail_sync_status(user.id)['ready']:
-            return jsonify(error='Check your inbox before sending follow-ups', code='inbox_not_synced'), 409
-        # Serialize this user's batch creation so two requests cannot both see a school as free.
-        db.session.query(svc.User.id).filter(svc.User.id == user.id).with_for_update().first()
-        rows = owned_rows(user, options['ids'])
-        if rows is None:
-            return jsonify(error='Send only to schools assigned to you'), 403
-
-        accepted, skipped = [], []
-        busy = in_flight_school_ids(row[0].id for row in rows)
-        for row in rows:
-            blockers = compute_blockers(kind, row, user.id, busy)
-            if blockers:
-                skipped.append((row, blockers[0]))
-            else:
-                accepted.append(row)
-
-        contents = {}
-        for row in accepted:
-            school, latest = row[0], row[1]
-            contents[school.id] = build_content(
-                kind, user, school, latest, options['subject'], options['body'], options['attachments'])
-        if token is not None:
-            try:
-                review = svc.outreach_review_signer().loads(token, max_age=900)
-            except BadSignature:
-                return jsonify(error='Your message review expired. Review the messages again.'), 409
-            prints = review.get('fingerprints', {})
-            if review.get('uid') != user.id or any(
-                    prints.get(f'{row[0].id}:{chosen_email(row[0], row[1], kind)}')
-                    != fingerprint(chosen_email(row[0], row[1], kind), contents[row[0].id])
-                    for row in accepted):
-                return jsonify(error='A recipient or message changed. Review the messages again before sending.'), 409
-
-        limits = limits_for(user)
-        if accepted and limits['remaining'] <= 0:
-            return jsonify(error='Daily sending limit reached', code='daily_limit', **limits), 429
-        allowed = accepted[:limits['remaining']]
-        skipped.extend((row, 'daily_limit') for row in accepted[limits['remaining']:])
-        if not allowed:
-            return jsonify(error='No eligible recipients', code='no_eligible_recipients',
-                           skipped=[{'school_id': row[0].id, 'reason': reason} for row, reason in skipped]), 400
-
-        batch = OutreachBatch(user_id=user.id, kind=kind, status='queued', subject=options['subject'],
-                              attachments=bool(options['attachments']), worker_token=str(uuid.uuid4()))
-        db.session.add(batch)
-        db.session.flush()
-        skip_by_id = {row[0].id: reason for row, reason in skipped}
-        allowed_ids = {row[0].id for row in allowed}
-        for position, row in enumerate(rows):
-            school, latest = row[0], row[1]
-            if school.id in allowed_ids:
-                content = contents[school.id]
-                db.session.add(OutreachRecipient(
-                    batch_id=batch.id, position=position, school_id=school.id, school_name=school.school_name,
-                    email=chosen_email(school, latest, kind), status='queued', subject=content['subject'],
-                    body=content['body'], attachments=json.dumps(content['pdf_files']),
-                    followup_of_email_id=latest.id if kind == 'followup' and latest is not None else None))
-            else:
-                db.session.add(OutreachRecipient(
-                    batch_id=batch.id, position=position, school_id=school.id, school_name=school.school_name,
-                    email=chosen_email(school, latest, kind), status='skipped', error=skip_by_id[school.id]))
-        db.session.commit()
-        start_worker(current_app._get_current_object(), batch.id, batch.worker_token)
-        return jsonify(batch_id=batch.id, status='queued', total=len(rows),
-                       skipped=[{'school_id': row[0].id, 'reason': reason} for row, reason in skipped]), 202
+        payload, status, batch = queue_batch(user, options, token)
+        if batch is not None:
+            start_worker(current_app._get_current_object(), batch.id, batch.worker_token)
+        return jsonify(**payload), status
 
     @app.get('/api/outreach/batches/<int:batch_id>')
     @jwt_required()

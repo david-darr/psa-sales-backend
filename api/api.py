@@ -269,6 +269,7 @@ class SentEmail(db.Model):
     sent_at = db.Column(db.DateTime, default=datetime.utcnow)
     responded = db.Column(db.Boolean, default=False)
     followup_sent = db.Column(db.Boolean, default=False)
+    followup_count = db.Column(db.Integer, nullable=False, default=0, server_default='0')  # 0, 1 or 2
     user_id = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=False)
     sales_school_id = db.Column(db.Integer, db.ForeignKey('sales_schools.id', ondelete='SET NULL'), nullable=True)
     
@@ -842,6 +843,16 @@ def start_scheduler():
                 misfire_grace_time=600  # 10 minutes grace period
             )
             
+            # Day-3 and day-7 follow-ups; the job checks replies first and only sends in business hours
+            scheduler.add_job(
+                func=lambda: run_auto_followups(app),
+                trigger="interval",
+                minutes=30,
+                id='auto_followups',
+                replace_existing=True,
+                misfire_grace_time=600
+            )
+
             # Add a heartbeat job to verify scheduler is working
             scheduler.add_job(
                 func=lambda: print(f"Scheduler heartbeat: {datetime.utcnow()}"),
@@ -989,7 +1000,7 @@ Best regards,
 {{ user_name }}  
 Sales Associate and Coach  
 {{ user_email }}
-https://thepsports.com
+https://thepsasports.com
 """
 
 ELEMENTARY_FOLLOWUP_TEMPLATE = """
@@ -1007,7 +1018,22 @@ Best regards,
 {{ user_name }}  
 Sales Associate and Coach  
 {{ user_email }}
-https://thepsports.com
+https://thepsasports.com
+"""
+
+# Second and last follow-up, sent if the first one also gets no reply
+FINAL_FOLLOWUP_TEMPLATE = """
+Hello there,
+
+I'm reaching out one last time about PSA's after-school sports programs for {{ school_name }}.
+
+If the timing isn't right this season, no problem at all. Just reply and let me know when would be a better time to reconnect, or who the best person to talk to would be.
+
+Best regards,  
+{{ user_name }}  
+Sales Associate and Coach  
+{{ user_email }}
+https://thepsasports.com
 """
 
 # Add private school follow-up template
@@ -2332,23 +2358,36 @@ def record_outbound_message(record, message_id, subject, kind):
             sent_email=record, message_id=message_id, subject=subject, kind=kind,
         ))
 
-FOLLOWUP_WAIT_DAYS = 7
+# Follow-up n (0-based) is due this many days after the original email.
+FOLLOWUP_SCHEDULE_DAYS = (3, 7)
+FOLLOWUP_WAIT_DAYS = FOLLOWUP_SCHEDULE_DAYS[0]
 FOLLOWUP_MAX_AGE_DAYS = MAIL_SYNC_LOOKBACK_DAYS
 FOLLOWUP_SUBJECT = "Follow-Up: PSA Programs"
 
 
+def followup_stage(email_record):
+    """How many follow-ups this email has had (older rows only set followup_sent)."""
+    return max(email_record.followup_count or 0, 1 if email_record.followup_sent else 0)
+
+
 def followup_due_at(email_record):
-    if not email_record.sent_at:
+    stage = followup_stage(email_record)
+    if not email_record.sent_at or stage >= len(FOLLOWUP_SCHEDULE_DAYS):
         return None
-    return email_record.sent_at + timedelta(days=FOLLOWUP_WAIT_DAYS)
+    return email_record.sent_at + timedelta(days=FOLLOWUP_SCHEDULE_DAYS[stage])
+
+
+def mark_followup_sent(email_record):
+    email_record.followup_count = followup_stage(email_record) + 1
+    email_record.followup_sent = True
 
 
 def followup_eligibility_error(email_record):
     """Use the same rule for the queue, preview, and final send."""
     if email_record.responded:
         return "This school has already responded"
-    if email_record.followup_sent:
-        return "Follow-up already sent"
+    if followup_stage(email_record) >= len(FOLLOWUP_SCHEDULE_DAYS):
+        return "Both follow-ups have already been sent"
     linked = db.session.get(SalesSchool, email_record.sales_school_id) if email_record.sales_school_id else None
     if linked and linked.status in FINISHED_STAGES:
         return "This school is a client or has closed out; no follow-up is needed"
@@ -2356,7 +2395,7 @@ def followup_eligibility_error(email_record):
         return "This email is too old for a follow-up; start a new conversation"
     due_at = followup_due_at(email_record)
     if due_at is None or utc_now() < due_at:
-        return "Follow-up is due 7 days after the original email"
+        return "Follow-ups are due 3 and 7 days after the original email"
     return None
 
 
@@ -2376,7 +2415,9 @@ def followup_message(user, original_email):
             (item for item in schools if original_email.school_email in item.get_all_emails()),
             None,
         )
-    if school and school.school_type == 'preschool':
+    if followup_stage(original_email) >= 1:
+        template = FINAL_FOLLOWUP_TEMPLATE
+    elif school and school.school_type == 'preschool':
         template = PRESCHOOL_FOLLOWUP_TEMPLATE
     elif school and school.school_type == 'private':
         template = PRIVATE_SCHOOL_FOLLOWUP_TEMPLATE
@@ -2461,7 +2502,7 @@ def send_followup():
         )
         
         if success:
-            original_email.followup_sent = True
+            mark_followup_sent(original_email)
             record_outbound_message(original_email, message_id, FOLLOWUP_SUBJECT, "followup")
             db.session.commit()
             return jsonify({"status": "follow-up sent"})
@@ -2533,6 +2574,7 @@ def get_sent_emails():
             "followup_eligible": email.user_id == user.id and followup_eligibility_error(email) is None,
             "responded": email.responded,
             "followup_sent": email.followup_sent,
+            "followup_count": followup_stage(email),
             "has_reply_content": bool(email.reply_content),
             "is_mine": email.user_id == user.id,
             "user_name": sender_user.name if sender_user else "Unknown"
@@ -2836,6 +2878,7 @@ def get_all_emails():
                 'sent_at': email.sent_at.isoformat() if email.sent_at else None,
                 'responded': email.responded,
                 'followup_sent': email.followup_sent,
+                'followup_count': followup_stage(email),
                 'user_id': email.user_id,
                 'user_name': user.name if user else None,
                 'user_email': user.email if user else None,
@@ -3123,11 +3166,14 @@ register_portfolio_routes(app, db, User, SalesSchool, SchoolActivity, SentEmail,
 register_finder_routes(app, db, SalesSchool, User, _FinderHooks)
 
 import sys as _sys
-from .outreach import register_outreach_routes
+from .outreach import register_outreach_routes, run_auto_followups  # noqa: E402,F401
 register_outreach_routes(app, db, _sys.modules[__name__])
 
 from .taskbar_sync import register_taskbar_sync  # noqa: E402
 register_taskbar_sync(app, db, User, SalesTask)
+
+from .support import register_support_routes  # noqa: E402
+SupportReport = register_support_routes(app, db, _sys.modules[__name__])
 
 from .agent_api import register_agent_api  # noqa: E402
 AgentApiKey, AgentApiAudit = register_agent_api(app, db, User, utc_now)

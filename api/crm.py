@@ -4,7 +4,7 @@ from datetime import datetime, timedelta, timezone
 
 from flask import jsonify, request
 from flask_jwt_extended import get_jwt_identity, jwt_required
-from sqlalchemy import func, or_, and_
+from sqlalchemy import and_, case, func, or_
 from sqlalchemy.orm import joinedload
 
 from .portfolio import FINISHED_STAGES, STAGES, set_school_status
@@ -29,6 +29,15 @@ def calendar_today():
     if value:
         return datetime.strptime(value, '%Y-%m-%d')
     return now().replace(hour=0, minute=0, second=0, microsecond=0)
+
+
+def followup_due_filter(model, current):
+    """SQL form of followup_due_at: first follow-up after 3 days, second after 7."""
+    from .api import FOLLOWUP_SCHEDULE_DAYS
+    count = case((and_(model.followup_sent.is_(True), func.coalesce(model.followup_count, 0) < 1), 1),
+                 else_=func.coalesce(model.followup_count, 0))
+    return or_(*[and_(count == stage, model.sent_at <= current - timedelta(days=days))
+                 for stage, days in enumerate(FOLLOWUP_SCHEDULE_DAYS)])
 
 
 def register_crm_routes(app, db, User, School, SentEmail, Task, Activity, serialize_school, Directory):
@@ -373,7 +382,7 @@ def register_crm_routes(app, db, User, School, SentEmail, Task, Activity, serial
         responded = emails.filter(SentEmail.responded.is_(True)).count()
         finished = db.session.query(School.id).filter(School.status.in_(FINISHED_STAGES))
         due_followups = emails.filter(SentEmail.user_id == user.id, SentEmail.responded.is_(False),
-            SentEmail.followup_sent.is_(False), SentEmail.sent_at <= now() - timedelta(days=7),
+            followup_due_filter(SentEmail, now()),
             SentEmail.sent_at >= now() - timedelta(days=90),
             or_(SentEmail.sales_school_id.is_(None), SentEmail.sales_school_id.notin_(finished))).count()
         chart_today = now().replace(hour=0, minute=0, second=0, microsecond=0)

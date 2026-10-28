@@ -103,22 +103,33 @@ class FollowupTests(unittest.TestCase):
             result = self.client.post(
                 "/api/send-followup", json={"email_id": record.id}, headers=self.auth(self.owner)
             )
-        self.assertEqual(result.status_code, 200)
-        self.assertEqual(send.call_args.kwargs["body"], body["body"])
-        self.assertEqual(send.call_args.kwargs["from_password"], "test-app-password")
-        self.assertTrue(record.followup_sent)
-        self.assertEqual(
-            self.client.post(
-                "/api/send-followup", json={"email_id": record.id}, headers=self.auth(self.owner)
-            ).status_code,
-            409,
-        )
+            self.assertEqual(result.status_code, 200)
+            self.assertEqual(send.call_args.kwargs["body"], body["body"])
+            self.assertEqual(send.call_args.kwargs["from_password"], "test-app-password")
+            self.assertTrue(record.followup_sent)
+            self.assertEqual(record.followup_count, 1)
+
+            # The email is 8 days old, so the second (final) follow-up is due too.
+            final = self.client.get(f"/api/followup-preview/{record.id}", headers=self.auth(self.owner))
+            self.assertIn("one last time", final.get_json()["body"])
+            second = self.client.post(
+                "/api/send-followup", json={"email_id": record.id}, headers=self.auth(self.owner))
+            self.assertEqual(second.status_code, 200)
+            self.assertEqual(record.followup_count, 2)
+            self.assertEqual(
+                self.client.post(
+                    "/api/send-followup", json={"email_id": record.id}, headers=self.auth(self.owner)
+                ).status_code,
+                409,
+            )
+            self.assertEqual(send.call_count, 2)
 
     def test_recent_responded_and_sent_records_never_send(self):
         records = [
-            self.email(age_days=6),
+            self.email(age_days=2),
             self.email(responded=True),
-            self.email(followup_sent=True),
+            self.email(age_days=6, followup_sent=True, followup_count=1),
+            self.email(followup_sent=True, followup_count=2),
         ]
         with patch.object(service, "send_email_with_attachments") as send:
             for record in records:
@@ -134,13 +145,22 @@ class FollowupTests(unittest.TestCase):
                     self.assertEqual(result.status_code, 409)
             send.assert_not_called()
 
-    def test_seven_day_boundary_and_failed_smtp(self):
+    def test_three_and_seven_day_boundaries_and_failed_smtp(self):
         now = service.utc_now()
-        record = self.email(sent_at=now - timedelta(days=7))
+        record = self.email(sent_at=now - timedelta(days=3))
         with patch.object(service, "utc_now", return_value=now):
+            self.assertIsNone(service.followup_eligibility_error(record))
+            record.sent_at = now - timedelta(days=3) + timedelta(seconds=1)
+            self.assertIsNotNone(service.followup_eligibility_error(record))
+            record.followup_count, record.followup_sent = 1, True
+            record.sent_at = now - timedelta(days=7)
             self.assertIsNone(service.followup_eligibility_error(record))
             record.sent_at = now - timedelta(days=7) + timedelta(seconds=1)
             self.assertIsNotNone(service.followup_eligibility_error(record))
+            record.followup_count = 2
+            record.sent_at = now - timedelta(days=30)
+            self.assertIsNotNone(service.followup_eligibility_error(record))
+        record.followup_count, record.followup_sent = 0, False
 
         record.sent_at = now - timedelta(days=8)
         service.db.session.commit()
