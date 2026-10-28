@@ -11,6 +11,9 @@ import html
 import imaplib
 import email
 import ssl
+import socket
+import base64
+import threading
 import pytz
 import atexit
 import logging
@@ -100,6 +103,8 @@ for prefix in ("postgres://", "postgresql://", "postgresql+psycopg://"):
         database_url = "postgresql+psycopg2://" + database_url[len(prefix):]
         break
 app.config['SQLALCHEMY_DATABASE_URI'] = database_url
+# Hosted Postgres drops idle connections; test before reuse instead of failing a request.
+app.config['SQLALCHEMY_ENGINE_OPTIONS'] = {'pool_pre_ping': True, 'pool_recycle': 280}
 db = SQLAlchemy(app)
 
 
@@ -2031,6 +2036,28 @@ def render_body_parts(body):
     return plain_body, html_body
 
 
+_ENCODED_PDFS = {}
+_ENCODED_PDFS_LOCK = threading.Lock()
+
+
+def encoded_pdf_payload(pdf_path):
+    """Base64 text for a PDF, encoded once and reused until the file changes on disk."""
+    try:
+        info = os.stat(pdf_path)
+    except OSError:
+        return None
+    key = (info.st_mtime_ns, info.st_size)
+    with _ENCODED_PDFS_LOCK:
+        cached = _ENCODED_PDFS.get(pdf_path)
+        if cached and cached[0] == key:
+            return cached[1]
+    with open(pdf_path, "rb") as handle:
+        encoded = base64.encodebytes(handle.read()).decode('ascii')
+    with _ENCODED_PDFS_LOCK:
+        _ENCODED_PDFS[pdf_path] = (key, encoded)
+    return encoded
+
+
 def build_email_message(from_email, from_name, to_email, subject, body, pdf_files,
                         message_id=None, in_reply_to=None):
     """Build a MIME message with PDF attachments (no network I/O)."""
@@ -2053,31 +2080,19 @@ def build_email_message(from_email, from_name, to_email, subject, body, pdf_file
     alt_part.attach(MIMEText(html_body, 'html', 'utf-8'))
     msg.attach(alt_part)
 
-    # Define the path where PDFs are stored
     pdf_directory = os.path.join(os.path.dirname(__file__), 'pdf_attachments')
 
-    # Attach PDF files
     for pdf_file in pdf_files:
         pdf_path = os.path.join(pdf_directory, pdf_file)
-
-        if os.path.exists(pdf_path):
-            with open(pdf_path, "rb") as attachment:
-                part = MIMEBase('application', 'pdf')
-                part.set_payload(attachment.read())
-
-            # Encode file in ASCII characters to send by email
-            encoders.encode_base64(part)
-
-            # Add header as key/value pair to attachment part
-            part.add_header(
-                'Content-Disposition',
-                f'attachment; filename="{pdf_file}"',  # Added quotes around filename
-            )
-
-            # Attach the part to message
-            msg.attach(part)
-        else:
+        encoded = encoded_pdf_payload(pdf_path)
+        if encoded is None:
             print(f"WARNING: PDF file not found: {pdf_path}")
+            continue
+        part = MIMEBase('application', 'pdf')
+        part.set_payload(encoded)
+        part['Content-Transfer-Encoding'] = 'base64'
+        part.add_header('Content-Disposition', f'attachment; filename="{pdf_file}"')
+        msg.attach(part)
 
     return msg
 
@@ -2150,6 +2165,13 @@ def send_emails_over_connection(from_email, from_password, from_name, jobs, dela
     return results
 
 
+ATTACHMENT_SLOTS = threading.BoundedSemaphore(max(1, int(os.getenv('OUTREACH_ATTACHMENT_SLOTS', '3'))))
+
+
+class AmbiguousDelivery(smtplib.SMTPException):
+    """The connection failed mid-message, so the provider may or may not have accepted it."""
+
+
 class SmtpSender:
     """One authenticated SMTP connection reused across many sends.
 
@@ -2159,29 +2181,57 @@ class SmtpSender:
     stop instead of hammering the provider with bad credentials.
     """
 
+    IDLE_CHECK_AFTER_SECONDS = 20
+
     def __init__(self, from_email, from_password, from_name):
         self.from_email = from_email
         self.from_password = from_password
         self.from_name = from_name
         self.server = None
+        self.last_used = 0.0
 
     def connect(self):
         self.close()
         self.server = open_smtp_connection(self.from_email, self.from_password)
+        self.last_used = time.monotonic()
+
+    def _ensure_live_connection(self):
+        """Reopen a connection the provider closed while idle, before any message is handed over."""
+        if self.server is None:
+            self.connect()
+        elif time.monotonic() - self.last_used > self.IDLE_CHECK_AFTER_SECONDS:
+            try:
+                self.server.noop()
+            except (smtplib.SMTPException, OSError):
+                self.connect()
 
     def send(self, job):
-        """Send one job dict (to_email, subject, body, pdf_files, optional in_reply_to)."""
+        """Send one job dict (to_email, subject, body, pdf_files, optional in_reply_to).
+
+        A server answer (rejection, quota) is raised as is. A connection that dies or times out
+        while the message is in flight raises AmbiguousDelivery and is never resent here, because
+        the provider may already have accepted it.
+        """
+        # Each attachment message is a few MB in memory while it is built and flattened, so only
+        # a few run at once per process no matter how many batches are active.
+        if job["pdf_files"]:
+            with ATTACHMENT_SLOTS:
+                return self._build_and_send(job)
+        return self._build_and_send(job)
+
+    def _build_and_send(self, job):
         msg = build_email_message(
             self.from_email, self.from_name, job["to_email"], job["subject"], job["body"],
             job["pdf_files"], in_reply_to=job.get("in_reply_to"),
         )
-        if self.server is None:
-            self.connect()
+        self._ensure_live_connection()
         try:
             self.server.send_message(msg, self.from_email, [job["to_email"]])
-        except smtplib.SMTPServerDisconnected:
-            self.connect()
-            self.server.send_message(msg, self.from_email, [job["to_email"]])
+        except (smtplib.SMTPServerDisconnected, socket.timeout, ConnectionError, ssl.SSLError) as exc:
+            raise AmbiguousDelivery(
+                "The connection dropped while sending, so delivery is unconfirmed. "
+                "Check your Sent mail before sending again.") from exc
+        self.last_used = time.monotonic()
         job["message_id"] = msg["Message-ID"]
         return job["message_id"]
 

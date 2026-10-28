@@ -16,6 +16,7 @@ import threading
 import time
 import uuid
 from datetime import timedelta
+from types import SimpleNamespace
 
 from flask import current_app, jsonify, request
 from flask_jwt_extended import get_jwt_identity, jwt_required
@@ -41,9 +42,9 @@ SUPPRESSION_KINDS = ('unsubscribed', 'do_not_contact')
 
 # Order decides which blocker is reported as the single "reason" for a skipped school.
 BLOCKER_ORDER = ('missing_email', 'unsubscribed', 'closed', 'replied',
-                 'recently_contacted', 'not_due', 'no_mailbox', 'not_owner')
+                 'recently_contacted', 'not_due', 'in_flight', 'no_mailbox', 'not_owner')
 PREVIEW_WARNINGS = ('missing_email', 'unsubscribed', 'closed', 'replied',
-                    'recently_contacted', 'not_due')
+                    'recently_contacted', 'not_due', 'in_flight')
 
 # Filled in by register_outreach_routes (the models need the app's db object).
 svc = None
@@ -238,10 +239,25 @@ def chosen_email(school, latest, kind):
     return (school.email or '').strip()
 
 
-def compute_blockers(kind, row, viewer_id):
+def in_flight_school_ids(school_ids):
+    """Schools that already have an email waiting or being sent in an unfinished batch."""
+    school_ids = list(school_ids)
+    if not school_ids:
+        return set()
+    rows = db.session.query(OutreachRecipient.school_id).join(
+        OutreachBatch, OutreachBatch.id == OutreachRecipient.batch_id).filter(
+        OutreachRecipient.school_id.in_(school_ids),
+        OutreachRecipient.status.in_(('queued', 'sending')),
+        OutreachBatch.status.in_(('queued', 'sending'))).distinct().all()
+    return {school_id for (school_id,) in rows}
+
+
+def compute_blockers(kind, row, viewer_id, in_flight=frozenset()):
     school, latest, last_email_at, responded_any, last_message_at, suppressed, _owner, has_mailbox = row
     current = now()
     blockers = set()
+    if school.id in in_flight:
+        blockers.add('in_flight')
     if not svc.valid_email(chosen_email(school, latest, kind)):
         blockers.add('missing_email')
     if suppressed:
@@ -345,9 +361,10 @@ def preview_response(data):
         return jsonify(error='Send only to schools assigned to you'), 403
     kind = options['kind']
     previews, fingerprints = [], {}
+    busy = in_flight_school_ids(row[0].id for row in rows)
     for row in rows:
         school, latest = row[0], row[1]
-        blockers = compute_blockers(kind, row, user.id)
+        blockers = compute_blockers(kind, row, user.id, busy)
         content = build_content(kind, user, school, latest, options['subject'], options['body'], options['attachments'])
         address = chosen_email(school, latest, kind)
         plain, html_body = svc.render_body_parts(content['body'])
@@ -386,7 +403,7 @@ def batch_dict(batch, counts, recipients=None):
         'total': sum(counts.values()),
         'sent': counts.get('sent', 0), 'failed': counts.get('failed', 0), 'skipped': counts.get('skipped', 0),
         'queued': counts.get('queued', 0), 'sending': counts.get('sending', 0),
-        'cancelled': counts.get('cancelled', 0),
+        'cancelled': counts.get('cancelled', 0), 'unconfirmed': counts.get('unconfirmed', 0),
         'created_at': iso(batch.created_at), 'finished_at': iso(batch.finished_at),
         'user_id': batch.user_id, 'owner_name': batch.owner.name if batch.owner else None,
     }
@@ -458,20 +475,30 @@ def _process_batch(batch_id, token, delay):
         _finish(batch_id, token)
         return
     sender = svc.SmtpSender(user.email, password, user.name)
+    # Plain values: the session is rolled back around every send, which would otherwise reload these rows each time.
+    batch_ctx = SimpleNamespace(id=batch.id, kind=batch.kind, user_id=batch.user_id)
+    user_id = user.id
+    quota = {'sent': None, 'since_check': 0}
     pause = False
     try:
         while True:
+            if pause and delay:
+                # Hand the pooled database connection back while idle so many batches cannot starve the web app.
+                db.session.rollback()
+                time.sleep(delay)
             db.session.expire_all()
             live = db.session.execute(select(OutreachBatch.status, OutreachBatch.worker_token).where(
                 OutreachBatch.id == batch_id)).one_or_none()
             if live is None or live.worker_token != token or live.status != 'sending':
                 break  # cancelled, retried by a newer worker, or deleted
-            recipient = db.session.query(OutreachRecipient).filter_by(
-                batch_id=batch_id, status='queued').order_by(OutreachRecipient.position, OutreachRecipient.id).first()
+            recipient = db.session.execute(select(
+                OutreachRecipient.id, OutreachRecipient.school_id, OutreachRecipient.email,
+                OutreachRecipient.subject, OutreachRecipient.body, OutreachRecipient.attachments,
+                OutreachRecipient.followup_of_email_id,
+            ).where(OutreachRecipient.batch_id == batch_id, OutreachRecipient.status == 'queued').order_by(
+                OutreachRecipient.position, OutreachRecipient.id).limit(1)).one_or_none()
             if recipient is None:
                 break
-            if pause and delay:
-                time.sleep(delay)
             claimed_row = db.session.execute(update(OutreachRecipient).where(
                 OutreachRecipient.id == recipient.id, OutreachRecipient.status == 'queued'
             ).values(status='sending', attempts=OutreachRecipient.attempts + 1)).rowcount
@@ -480,14 +507,21 @@ def _process_batch(batch_id, token, delay):
             if not claimed_row:
                 pause = False
                 continue
-            db.session.refresh(recipient)
-            outcome = _process_recipient(batch, user, recipient, sender)
+            outcome = _process_recipient(batch_ctx, user_id, recipient, sender, quota)
             pause = outcome != 'skipped'
             if outcome == 'stop':
                 break
     finally:
         sender.close()
     _finish(batch_id, token)
+
+
+def mark_stalled_unconfirmed(batch_id):
+    """A worker died mid-send: that email may already be delivered, so never resend it automatically."""
+    db.session.execute(update(OutreachRecipient).where(
+        OutreachRecipient.batch_id == batch_id, OutreachRecipient.status == 'sending'
+    ).values(status='unconfirmed',
+             error='The app stopped while this was sending. Check your Sent mail before sending again.'))
 
 
 def _finish(batch_id, token):
@@ -509,9 +543,12 @@ def skip_reason(batch, recipient, school):
         return 'closed'
     if school.status in REPLIED_STAGES:
         return 'replied'
-    if db.session.query(exists().where(
-            svc.SchoolActivity.sales_school_id == school.id,
-            svc.SchoolActivity.kind.in_(SUPPRESSION_KINDS))).scalar():
+    unsubscribed, replied = db.session.execute(select(
+        exists().where(svc.SchoolActivity.sales_school_id == school.id,
+                       svc.SchoolActivity.kind.in_(SUPPRESSION_KINDS)),
+        exists().where(svc.SentEmail.sales_school_id == school.id, svc.SentEmail.responded.is_(True)),
+    )).one()
+    if unsubscribed:
         return 'unsubscribed'
     if batch.kind == 'followup':
         original = db.session.get(svc.SentEmail, recipient.followup_of_email_id) if recipient.followup_of_email_id else None
@@ -519,10 +556,22 @@ def skip_reason(batch, recipient, school):
             return 'not_due'
         if original.responded:
             return 'replied'
-    elif db.session.query(exists().where(
-            svc.SentEmail.sales_school_id == school.id, svc.SentEmail.responded.is_(True))).scalar():
+    elif replied:
         return 'replied'
     return None
+
+
+QUOTA_RECHECK_EVERY = 10
+
+
+def _under_daily_limit(user_id, quota):
+    """Count today's sends once, track our own sends locally, and re-query every few sends or near the limit."""
+    limit = daily_limit()
+    sent = quota['sent']
+    if sent is None or quota['since_check'] >= QUOTA_RECHECK_EVERY or limit - sent <= QUOTA_RECHECK_EVERY:
+        sent = quota['sent'] = sent_today(user_id)
+        quota['since_check'] = 0
+    return sent < limit
 
 
 def _looks_like_quota(error):
@@ -530,26 +579,21 @@ def _looks_like_quota(error):
     return '5.4.5' in text or 'quota' in text or 'sending limit' in text or 'rate limit' in text
 
 
-def _process_recipient(batch, user, recipient, sender):
-    """Send one recipient. Returns 'skipped', 'sent', 'failed' or 'stop' (abort the whole batch)."""
+def _process_recipient(batch, user_id, recipient, sender, quota):
+    """Send one recipient. Returns 'skipped', 'sent', 'failed', 'unconfirmed' or 'stop' (abort the whole batch).
+
+    `batch` and `recipient` are plain value objects (id, kind, columns), not ORM rows.
+    """
+    recipient_id, batch_id = recipient.id, batch.id
     school = db.session.get(svc.SalesSchool, recipient.school_id) if recipient.school_id else None
     reason = skip_reason(batch, recipient, school)
-    if reason is None and sent_today(user.id) >= daily_limit():
+    if reason is None and not _under_daily_limit(user_id, quota):
         reason = 'daily_limit'
     if reason:
-        recipient.status, recipient.error = 'skipped', reason
+        db.session.execute(update(OutreachRecipient).where(OutreachRecipient.id == recipient_id).values(
+            status='skipped', error=reason))
         db.session.commit()
         return 'skipped'
-
-    if sender.server is None:
-        try:
-            sender.connect()
-        except Exception as exc:
-            error = 'SMTP login failed: ' + clean_error(exc)
-            recipient.status, recipient.error = 'failed', error
-            db.session.commit()
-            _fail_remaining(batch.id, error)
-            return 'stop'
 
     job = {'to_email': recipient.email, 'subject': recipient.subject or '', 'body': recipient.body or '',
            'pdf_files': json.loads(recipient.attachments or '[]')}
@@ -560,35 +604,56 @@ def _process_recipient(batch, user, recipient, sender):
             svc.SentMessage.sent_at.desc()).first() if original else None
         job['in_reply_to'] = latest.message_id if latest else None
 
+    # Everything below talks to the mail provider and can take seconds: do it without holding a pooled connection.
+    db.session.rollback()
+
+    if sender.server is None:
+        try:
+            sender.connect()
+        except Exception as exc:
+            error = 'SMTP login failed: ' + clean_error(exc)
+            db.session.execute(update(OutreachRecipient).where(OutreachRecipient.id == recipient_id).values(
+                status='failed', error=error))
+            db.session.commit()
+            _fail_remaining(batch_id, error)
+            return 'stop'
+
     try:
         sender.send(job)
+    except svc.AmbiguousDelivery as exc:
+        db.session.execute(update(OutreachRecipient).where(OutreachRecipient.id == recipient_id).values(
+            status='unconfirmed', error=clean_error(exc)))
+        db.session.commit()
+        sender.close()
+        return 'unconfirmed'
     except Exception as exc:
-        db.session.rollback()
         error = clean_error(exc)
-        db.session.execute(update(OutreachRecipient).where(OutreachRecipient.id == recipient.id).values(
+        db.session.execute(update(OutreachRecipient).where(OutreachRecipient.id == recipient_id).values(
             status='failed', error=error))
         db.session.commit()
         sender.reset()
         if _looks_like_quota(exc):
-            _fail_remaining(batch.id, 'Mail provider sending limit reached: ' + error)
+            _fail_remaining(batch_id, 'Mail provider sending limit reached: ' + error)
             return 'stop'
         return 'failed'
 
     for attempt in range(2):
         try:
-            _record_success(batch, user, recipient, school, original, job)
+            _record_success(batch, user_id, recipient, school, original, job)
+            quota['since_check'] += 1
+            if quota['sent'] is not None:
+                quota['sent'] += 1
             return 'sent'
         except Exception:
             db.session.rollback()
-            log.exception('Could not record a sent outreach email (recipient %s, attempt %s)', recipient.id, attempt + 1)
-    db.session.execute(update(OutreachRecipient).where(OutreachRecipient.id == recipient.id).values(
-        status='failed', error='Sent, but not recorded. Check your Sent mail before retrying.'))
+            log.exception('Could not record a sent outreach email (recipient %s, attempt %s)', recipient_id, attempt + 1)
+    db.session.execute(update(OutreachRecipient).where(OutreachRecipient.id == recipient_id).values(
+        status='unconfirmed', error='Sent, but not recorded. Check your Sent mail before sending again.'))
     db.session.commit()
-    return 'failed'
+    return 'unconfirmed'
 
 
-def _record_success(batch, user, recipient, school, original, job):
-    recipient = db.session.get(OutreachRecipient, recipient.id)
+def _record_success(batch, user_id, recipient, school, original, job):
     if batch.kind == 'followup' and original is not None:
         original = db.session.get(svc.SentEmail, original.id)
         original.followup_sent = True
@@ -597,14 +662,14 @@ def _record_success(batch, user, recipient, school, original, job):
     else:
         school = db.session.get(svc.SalesSchool, school.id)
         sent_email = svc.SentEmail(
-            school_name=school.school_name, school_email=recipient.email, user_id=user.id,
+            school_name=school.school_name, school_email=recipient.email, user_id=user_id,
             sales_school_id=school.id, responded=False, followup_sent=False)
         db.session.add(sent_email)
         svc.record_outbound_message(sent_email, job.get('message_id'), recipient.subject, 'outreach')
         svc.advance_school_stage(school)
     db.session.flush()
-    recipient.sent_email_id = sent_email.id
-    recipient.status, recipient.sent_at, recipient.error = 'sent', now(), None
+    db.session.execute(update(OutreachRecipient).where(OutreachRecipient.id == recipient.id).values(
+        sent_email_id=sent_email.id, status='sent', sent_at=now(), error=None))
     _touch(batch.id)
     db.session.commit()
 
@@ -671,10 +736,11 @@ def register_outreach_routes(app, database, service):
         total = query.order_by(None).count()
         rows = query.order_by(*order).offset((page - 1) * per_page).limit(per_page).all()
         items = []
+        busy = in_flight_school_ids(row[0].id for row in rows)
         for row in rows:
             school, latest, last_email_at, _responded, last_message_at = row[:5]
             last_contact = max([item for item in (last_email_at, last_message_at) if item], default=None)
-            blockers = compute_blockers(kind, row, user.id)
+            blockers = compute_blockers(kind, row, user.id, busy)
             items.append({
                 'school_id': school.id, 'school_name': school.school_name,
                 'email': chosen_email(school, latest, kind), 'contact_name': school.contact_name,
@@ -715,13 +781,16 @@ def register_outreach_routes(app, database, service):
         kind = options['kind']
         if kind == 'followup' and not svc.mail_sync_status(user.id)['ready']:
             return jsonify(error='Check your inbox before sending follow-ups', code='inbox_not_synced'), 409
+        # Serialize this user's batch creation so two requests cannot both see a school as free.
+        db.session.query(svc.User.id).filter(svc.User.id == user.id).with_for_update().first()
         rows = owned_rows(user, options['ids'])
         if rows is None:
             return jsonify(error='Send only to schools assigned to you'), 403
 
         accepted, skipped = [], []
+        busy = in_flight_school_ids(row[0].id for row in rows)
         for row in rows:
-            blockers = compute_blockers(kind, row, user.id)
+            blockers = compute_blockers(kind, row, user.id, busy)
             if blockers:
                 skipped.append((row, blockers[0]))
             else:
@@ -820,6 +889,8 @@ def register_outreach_routes(app, database, service):
             return jsonify(error='Batch not found'), 404
         if batch.status == 'done':
             return jsonify(error='This batch has already finished'), 409
+        if effective_status(batch) == 'stalled':
+            mark_stalled_unconfirmed(batch.id)
         cancelled = db.session.execute(update(OutreachRecipient).where(
             OutreachRecipient.batch_id == batch.id, OutreachRecipient.status == 'queued'
         ).values(status='cancelled')).rowcount
@@ -841,11 +912,18 @@ def register_outreach_routes(app, database, service):
         if state in ('queued', 'sending'):
             return jsonify(error='This batch is still sending'), 409
         stalled = state == 'stalled'
-        retryable = ['failed'] + (['sending', 'queued'] if stalled else [])
+        body = request.get_json(silent=True)
+        include_unconfirmed = isinstance(body, dict) and body.get('include_unconfirmed') is True
+        if stalled:
+            mark_stalled_unconfirmed(batch.id)
+        retryable = ['failed'] + (['queued'] if stalled else []) + (['unconfirmed'] if include_unconfirmed else [])
         candidates = db.session.query(OutreachRecipient).filter(
             OutreachRecipient.batch_id == batch.id, OutreachRecipient.status.in_(retryable)
         ).order_by(OutreachRecipient.position, OutreachRecipient.id).all()
         if not candidates:
+            if stalled:
+                batch.status, batch.finished_at = 'done', now()
+            db.session.commit()
             return jsonify(error='Nothing to retry', code='nothing_to_retry'), 409
         owner = db.session.get(svc.User, batch.user_id)
         if not owner or not owner.email_password:
@@ -859,8 +937,6 @@ def register_outreach_routes(app, database, service):
             not_retried.append({'school_id': item.school_id, 'reason': 'daily_limit'})
             if item.status == 'queued':
                 item.status, item.error = 'skipped', 'daily_limit'
-            elif item.status == 'sending':
-                item.status, item.error = 'failed', 'Stalled before the daily limit was reached'
         for item in accepted:
             item.status, item.error = 'queued', None
         batch.status, batch.finished_at = 'queued', None

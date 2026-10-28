@@ -306,7 +306,7 @@ class BatchLifecycleTests(OutreachBase):
         self.run_workers()
         data = self.get_batch(self.owner, created['batch_id'])
         self.assertEqual(set(data), {'id', 'kind', 'status', 'total', 'sent', 'failed', 'skipped', 'created_at',
-                                     'finished_at', 'recipients', 'queued', 'sending', 'cancelled', 'user_id', 'owner_name'})
+                                     'finished_at', 'recipients', 'queued', 'sending', 'cancelled', 'unconfirmed', 'user_id', 'owner_name'})
         self.assertEqual((data['status'], data['kind'], data['total'], data['sent'], data['failed'], data['skipped']),
                          ('done', 'custom', 2, 2, 0, 0))
         self.assertIsNotNone(data['finished_at'])
@@ -433,14 +433,15 @@ class BatchLifecycleTests(OutreachBase):
         self.assertEqual(self.get_batch(self.owner, batch_id)['status'], 'stalled')
         self.assertEqual(self.client.get('/api/outreach/batches', headers=self.auth(self.owner)).get_json()['items'][0]['status'], 'stalled')
         retried = self.client.post(f'/api/outreach/batches/{batch_id}/retry', headers=self.auth(self.owner))
-        self.assertEqual((retried.status_code, retried.get_json()['requeued']), (202, 2))
+        self.assertEqual((retried.status_code, retried.get_json()['requeued']), (202, 1))
         new_token = self.started[0][1]
         self.assertNotEqual(old_token, new_token)
         outreach.run_batch(service.app, batch_id, old_token, delay=0)  # a zombie from before the retry
         self.assertEqual(self.fake.sent, [])
         self.run_workers()
         data = self.get_batch(self.owner, batch_id)
-        self.assertEqual((data['status'], data['sent']), ('done', 2))
+        self.assertEqual((data['status'], data['sent'], data['unconfirmed']), ('done', 1, 1))
+        self.assertEqual(self.fake.sent, [schools[1].email])
 
     def test_active_batch_is_not_retryable_and_fresh_sending_is_not_stalled(self):
         school = self.school('Busy School')
@@ -451,14 +452,90 @@ class BatchLifecycleTests(OutreachBase):
         service.db.session.commit()
         self.assertEqual(self.get_batch(self.owner, batch_id)['status'], 'sending')
 
-    def test_dropped_connection_is_reopened_once(self):
+    def test_connection_dropped_mid_send_is_unconfirmed_not_resent(self):
         schools = [self.school(f'Drop School {index}') for index in range(2)]
         self.fake.disconnect_once_for = {schools[0].email}
         with patch.object(service, 'open_smtp_connection', side_effect=lambda *a, **k: self.fake) as opener:
             batch_id = self.create_batch(self.owner, school_ids=[item.id for item in schools], kind='initial').get_json()['batch_id']
             self.run_workers()
-        self.assertEqual(self.get_batch(self.owner, batch_id)['sent'], 2)
+        data = self.get_batch(self.owner, batch_id)
+        self.assertEqual((data['status'], data['sent'], data['unconfirmed'], data['failed']), ('done', 1, 1, 0))
+        self.assertEqual(self.fake.sent, [schools[1].email])
+        self.assertIn('unconfirmed', data['recipients'][0]['error'])
         self.assertEqual(opener.call_count, 2)
+
+        retry = self.client.post(f'/api/outreach/batches/{batch_id}/retry', headers=self.auth(self.owner))
+        self.assertEqual((retry.status_code, retry.get_json()['code']), (409, 'nothing_to_retry'))
+        with patch.object(service, 'open_smtp_connection', side_effect=lambda *a, **k: self.fake):
+            retry = self.client.post(f'/api/outreach/batches/{batch_id}/retry', headers=self.auth(self.owner),
+                                     json={'include_unconfirmed': True})
+            self.assertEqual((retry.status_code, retry.get_json()['requeued']), (202, 1))
+            self.run_workers()
+        self.assertEqual(self.get_batch(self.owner, batch_id)['sent'], 2)
+
+    def test_attachment_is_encoded_once_and_arrives_intact(self):
+        pdf_dir = os.path.join(os.path.dirname(service.__file__), 'pdf_attachments')
+        name = sorted(f for f in os.listdir(pdf_dir) if f.lower().endswith('.pdf'))[0]
+        path = os.path.join(pdf_dir, name)
+        service._ENCODED_PDFS.clear()
+        with patch.object(service.base64, 'encodebytes', wraps=base64.encodebytes) as encode:
+            messages = [service.build_email_message('a@x.com', 'A', f'{i}@y.com', 's', 'b', [name]) for i in range(3)]
+        self.assertEqual(encode.call_count, 1)
+        with open(path, 'rb') as handle:
+            original = handle.read()
+        for msg in messages:
+            part = [p for p in msg.walk() if p.get_filename() == name][0]
+            self.assertEqual(part['Content-Transfer-Encoding'], 'base64')
+            self.assertEqual(part.get_payload(decode=True), original)
+        self.assertIsNone(service.encoded_pdf_payload(os.path.join(pdf_dir, 'missing.pdf')))
+
+    def test_attachment_cache_refreshes_when_the_file_changes(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, 'a.pdf')
+            with open(path, 'wb') as handle:
+                handle.write(b'first')
+            first = service.encoded_pdf_payload(path)
+            with open(path, 'wb') as handle:
+                handle.write(b'second version')
+            self.assertNotEqual(service.encoded_pdf_payload(path), first)
+
+    def test_idle_connection_is_checked_and_reopened_before_sending(self):
+        class StaleConnection(FakeSMTP):
+            def noop(self):
+                raise smtplib.SMTPServerDisconnected('idle timeout')
+        stale, fresh = StaleConnection(), FakeSMTP()
+        with patch.object(service, 'open_smtp_connection', side_effect=[stale, fresh]) as opener:
+            sender = service.SmtpSender('owner@example.test', 'pw', 'Owner')
+            sender.connect()
+            sender.last_used -= 60
+            sender.send({'to_email': 'a@school.test', 'subject': 's', 'body': 'b', 'pdf_files': []})
+        self.assertEqual((stale.sent, fresh.sent, opener.call_count), ([], ['a@school.test'], 2))
+
+    def test_school_already_in_an_unfinished_batch_cannot_be_queued_again(self):
+        school = self.school('Busy School Twice')
+        with patch.object(outreach, 'start_worker'):
+            first = self.create_batch(self.owner, school_ids=[school.id], kind='initial')
+            second = self.create_batch(self.owner, school_ids=[school.id], kind='initial')
+        self.assertEqual(first.status_code, 202)
+        self.assertEqual(second.status_code, 400)
+        self.assertEqual(second.get_json()['skipped'][0]['reason'], 'in_flight')
+
+    def test_stalled_batch_does_not_resend_the_email_that_was_in_flight(self):
+        schools = [self.school(f'Stall School {index}') for index in range(3)]
+        with patch.object(outreach, 'start_worker'):
+            batch_id = self.create_batch(self.owner, school_ids=[item.id for item in schools], kind='initial').get_json()['batch_id']
+        recipients = outreach.OutreachRecipient.query.filter_by(batch_id=batch_id).order_by(outreach.OutreachRecipient.position).all()
+        recipients[0].status = 'sending'
+        batch = outreach.OutreachBatch.query.get(batch_id)
+        batch.status, batch.heartbeat_at = 'sending', service.utc_now() - timedelta(minutes=20)
+        service.db.session.commit()
+        retry = self.client.post(f'/api/outreach/batches/{batch_id}/retry', headers=self.auth(self.owner))
+        self.assertEqual((retry.status_code, retry.get_json()['requeued']), (202, 2))
+        self.run_workers()
+        data = self.get_batch(self.owner, batch_id)
+        self.assertEqual((data['sent'], data['unconfirmed']), (2, 1))
+        self.assertNotIn(schools[0].email, self.fake.sent)
 
     def test_login_failure_fails_every_recipient_without_hammering(self):
         schools = [self.school(f'Login School {index}') for index in range(3)]

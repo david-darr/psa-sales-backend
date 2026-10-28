@@ -88,7 +88,11 @@ Configure the hosted schedule separately with the existing backend environment s
 
 ## Remaining operational limits
 
-- SMTP delivery still happens in request batches. The review token protects reviewed content; it does not provide durable delivery jobs or make retries idempotent. A connection failure can leave delivery uncertain. Check history and the mailbox before retrying. A durable send ledger/worker is the next delivery improvement.
+- Outreach sends run as saved batches (`outreach_batches`, `outreach_recipients`) worked by a background thread inside the web process, with a heartbeat, a stall check, and a daily limit reserved at queue time. A batch survives a refresh, and a stalled batch can be retried. It does not survive a web restart on its own: it shows as stalled until someone retries it.
+- SMTP cannot promise exactly-once delivery. If the connection drops while a message is in flight, the email is marked `unconfirmed` and is never resent automatically. The batch screen offers an explicit "Send again" for those. The same applies to a batch whose worker died mid-send. A school already in an unfinished batch is blocked from a second one (`in_flight`).
+- Attachments are base64-encoded once per file and reused until the file changes, and at most `OUTREACH_ATTACHMENT_SLOTS` (default 3) attachment emails are built at once per process. Local test: 12 concurrent attachment batches went from +692 MB to about +330 MB, and 100 attachment emails from 55 s to 29 s. Preschool intro emails are still about 12 MB each on the wire, so Gmail transfer time and its message size limits are unchanged. Shrinking the PDFs themselves would be the next step.
+- A worker needs about 12 database queries per email and releases its pooled connection before every pause and send. A load run with 30 reps sending at once kept web p95 under 60 ms.
+- Not verified here: a live Gmail send, and the hosted Render and Supabase environment. The local harness (`api/tests/load_outreach.py`, throwaway Postgres plus a fake SMTP server) passes 49 checks. Run it again before a release and do one controlled single-recipient send after deploy.
 - Gmail uses encrypted app passwords. OAuth remains a separate integration and rollout decision.
 - Legacy emails do not have reliable historical thread identifiers. Matching is more limited than for new tracked messages.
 - Scheduled mailbox checks depend on configuring the hosted job. The in-process fallback alone does not run when the web process is down.
