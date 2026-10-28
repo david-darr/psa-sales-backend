@@ -542,7 +542,8 @@ def extract_email_from_string(email_string):
 # EMAIL REPLY CHECKING SYSTEM
 # ====================================================
 
-MAIL_SYNC_BATCH_LIMIT = 60
+MAIL_SYNC_BATCH_LIMIT = 500  # headers scanned per check; full messages are fetched only for replies
+MAIL_HEADER_FIELDS = 'FROM DATE SUBJECT MESSAGE-ID IN-REPLY-TO REFERENCES AUTO-SUBMITTED PRECEDENCE LIST-ID'
 MAIL_SYNC_LOOKBACK_DAYS = 90
 MAIL_SYNC_FRESHNESS = timedelta(minutes=45)
 
@@ -647,7 +648,19 @@ def sync_user_mailbox(user, max_messages=MAIL_SYNC_BATCH_LIMIT):
             state.last_success_at = None
 
         lookback = utc_now() - timedelta(days=MAIL_SYNC_LOOKBACK_DAYS)
-        since = lookback.strftime('%d-%b-%Y')
+        records = SentEmail.query.filter(
+            SentEmail.user_id == user.id, SentEmail.sent_at >= lookback,
+        ).all()
+        if not records:
+            # Nothing to match yet; the login above still verifies the connection.
+            state.pending_count = 0
+            state.last_checked_at = state.last_success_at = utc_now()
+            state.last_error = None
+            db.session.commit()
+            return {"replies_found": 0, "messages_checked": 0, "pending_count": 0, **mail_sync_status(user.id)}
+        # A reply cannot predate the first email it answers, so older mail is never scanned.
+        # One day of slack covers IMAP's date-only SINCE and time zones.
+        since = (min(record.sent_at for record in records) - timedelta(days=1)).strftime('%d-%b-%Y')
         result, data = mailbox.uid('SEARCH', None, 'UID', f'{state.last_uid + 1}:*', 'SINCE', since)
         if result != 'OK':
             raise RuntimeError('Mailbox search failed')
@@ -655,9 +668,6 @@ def sync_user_mailbox(user, max_messages=MAIL_SYNC_BATCH_LIMIT):
         pending = [uid for uid in all_uids if uid > state.last_uid]
         batch = pending[:max_messages]
 
-        records = SentEmail.query.filter(
-            SentEmail.user_id == user.id, SentEmail.sent_at >= lookback,
-        ).all()
         record_by_id = {record.id: record for record in records}
         outbound_by_id = {
             item.message_id: record_by_id[item.sent_email_id]
@@ -679,46 +689,61 @@ def sync_user_mailbox(user, max_messages=MAIL_SYNC_BATCH_LIMIT):
         found = 0
         checked = 0
         deadline = time.monotonic() + 25
-        for uid in batch:
+        for start in range(0, len(batch), 100):
             if time.monotonic() >= deadline:
                 break
-            result, pieces = mailbox.uid('FETCH', str(uid), '(BODY.PEEK[])')
-            payload = next(
-                (part[1] for part in (pieces or []) if isinstance(part, tuple)
-                 and len(part) > 1 and isinstance(part[1], bytes)), None,
-            )
-            if result != 'OK' or payload is None:
-                raise RuntimeError('Mailbox message fetch failed')
-            message = BytesParser(policy=policy.default).parsebytes(payload)
-            message_id = (message.get('Message-ID') or '').strip() or f'imap:{user.id}:{validity}:{uid}'
-            if message_id not in seen_ids and _is_human_reply(message, user.email):
-                record = _reply_record(message, outbound_by_id, sent_by_address)
-                if record:
-                    received_at = _mail_date(message)
-                    db.session.add(EmailReply(
-                        sent_email_id=record.id,
-                        reply_content=_plain_reply(message),
-                        reply_subject=str(message.get('Subject') or ''),
-                        reply_date=received_at,
-                        reply_sender=str(message.get('From') or ''),
-                        reply_message_id=message_id,
-                    ))
-                    record.responded = True
-                    record.reply_count = (record.reply_count or 0) + 1
-                    record.last_reply_date = received_at
-                    if record.reply_count == 1:
-                        record.reply_content = _plain_reply(message)
-                        record.reply_subject = str(message.get('Subject') or '')
-                        record.reply_date = received_at
-                        record.reply_sender = str(message.get('From') or '')
-                    if record.sales_school_id:
-                        school = db.session.get(SalesSchool, record.sales_school_id)
-                        if school and school.status in ('pending', 'contacted'):
-                            school.status = 'replied'
-                    seen_ids.add(message_id)
-                    found += 1
-            state.last_uid = uid
-            checked += 1
+            chunk = batch[start:start + 100]
+            # Headers decide whether a message is a reply; bodies are fetched only for replies.
+            result, pieces = mailbox.uid('FETCH', ','.join(str(uid) for uid in chunk),
+                                         f'(UID BODY.PEEK[HEADER.FIELDS ({MAIL_HEADER_FIELDS})])')
+            if result != 'OK':
+                raise RuntimeError('Mailbox header fetch failed')
+            headers = {}
+            for part in pieces or []:
+                if isinstance(part, tuple) and len(part) > 1 and isinstance(part[1], bytes):
+                    match = re.search(rb'UID (\d+)', part[0] or b'')
+                    if match:
+                        headers[int(match.group(1))] = part[1]
+            for uid in chunk:
+                payload = headers.get(uid)
+                if payload is not None:
+                    message = BytesParser(policy=policy.default).parsebytes(payload)
+                    message_id = (message.get('Message-ID') or '').strip() or f'imap:{user.id}:{validity}:{uid}'
+                    record = None
+                    if message_id not in seen_ids and _is_human_reply(message, user.email):
+                        record = _reply_record(message, outbound_by_id, sent_by_address)
+                    if record:
+                        result, full = mailbox.uid('FETCH', str(uid), '(BODY.PEEK[])')
+                        body = next((item[1] for item in (full or []) if isinstance(item, tuple)
+                                     and len(item) > 1 and isinstance(item[1], bytes)), None)
+                        if result != 'OK' or body is None:
+                            raise RuntimeError('Mailbox message fetch failed')
+                        message = BytesParser(policy=policy.default).parsebytes(body)
+                        received_at = _mail_date(message)
+                        db.session.add(EmailReply(
+                            sent_email_id=record.id,
+                            reply_content=_plain_reply(message),
+                            reply_subject=str(message.get('Subject') or ''),
+                            reply_date=received_at,
+                            reply_sender=str(message.get('From') or ''),
+                            reply_message_id=message_id,
+                        ))
+                        record.responded = True
+                        record.reply_count = (record.reply_count or 0) + 1
+                        record.last_reply_date = received_at
+                        if record.reply_count == 1:
+                            record.reply_content = _plain_reply(message)
+                            record.reply_subject = str(message.get('Subject') or '')
+                            record.reply_date = received_at
+                            record.reply_sender = str(message.get('From') or '')
+                        if record.sales_school_id:
+                            school = db.session.get(SalesSchool, record.sales_school_id)
+                            if school and school.status in ('pending', 'contacted'):
+                                school.status = 'replied'
+                        seen_ids.add(message_id)
+                        found += 1
+                state.last_uid = uid
+                checked += 1
 
         remaining = len(pending) - checked
         state.pending_count = remaining

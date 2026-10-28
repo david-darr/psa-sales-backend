@@ -29,6 +29,20 @@ def incoming(sender, subject, message_id, reference=None):
     return message.as_bytes()
 
 
+def fake_imap(payloads, calls=None):
+    """IMAP uid() stand-in: SEARCH lists every UID; FETCH serves headers for a UID set or one full message."""
+    def uid(command, *args):
+        if command == 'SEARCH':
+            return 'OK', [' '.join(str(key) for key in sorted(payloads)).encode()]
+        if command == 'FETCH':
+            wanted = [int(item) for item in args[0].split(',')]
+            if calls is not None:
+                calls.append(('headers' if 'HEADER.FIELDS' in args[1] else 'full', wanted))
+            return 'OK', [(f'{n} (UID {n} BODY[] {{size}})'.encode(), payloads[n]) for n in wanted if n in payloads]
+        raise AssertionError(command)
+    return uid
+
+
 class ReplySyncWorkspaceTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -92,14 +106,9 @@ class ReplySyncWorkspaceTests(unittest.TestCase):
         unrelated = incoming('news@other.test', 'Hello', '<unrelated@test>')
         reply = incoming('assistant@maple.test', 'New subject', '<reply@test>',
                          '<outbound@owner.test>')
-        payloads = {'1': unrelated, '2': reply}
 
-        def uid(command, *args):
-            if command == 'SEARCH':
-                return 'OK', [b'1 2']
-            if command == 'FETCH':
-                return 'OK', [(b'2 (BODY[] {size})', payloads[args[0]])]
-            raise AssertionError(command)
+        payloads = {1: unrelated, 2: reply}
+        uid = fake_imap(payloads)
 
         with patch.object(service.imaplib, 'IMAP4_SSL') as factory:
             mailbox = factory.return_value
@@ -132,10 +141,7 @@ class ReplySyncWorkspaceTests(unittest.TestCase):
             mailbox = factory.return_value
             mailbox.select.return_value = ('OK', [b'1'])
             mailbox.response.return_value = ('UIDVALIDITY', [b'7'])
-            mailbox.uid.side_effect = lambda command, *args: (
-                ('OK', [b'1']) if command == 'SEARCH'
-                else ('OK', [(b'1 (BODY[] {size})', reply)])
-            )
+            mailbox.uid.side_effect = fake_imap({1: reply})
             result = service.sync_user_mailbox(self.owner)
         self.assertEqual(result['replies_found'], 1)
         self.assertTrue(result['ready'])
@@ -146,10 +152,7 @@ class ReplySyncWorkspaceTests(unittest.TestCase):
             mailbox = factory.return_value
             mailbox.select.return_value = ('OK', [b'1'])
             mailbox.response.return_value = ('UIDVALIDITY', [b'8'])
-            mailbox.uid.side_effect = lambda command, *args: (
-                ('OK', [b'1']) if command == 'SEARCH'
-                else ('OK', [(b'1 (BODY[] {size})', message)])
-            )
+            mailbox.uid.side_effect = fake_imap({1: message})
             result = service.sync_user_mailbox(self.owner)
         self.assertEqual(result['replies_found'], 0)
         self.assertFalse(self.sent.responded)
@@ -166,18 +169,61 @@ class ReplySyncWorkspaceTests(unittest.TestCase):
         automated['In-Reply-To'] = '<outbound@owner.test>'
         automated['Auto-Submitted'] = 'auto-replied'
         automated.set_content('Away from the office')
-        payloads = {b'1': bounced, b'2': own, b'3': automated.as_bytes()}
+        payloads = {1: bounced, 2: own, 3: automated.as_bytes()}
         with patch.object(service.imaplib, 'IMAP4_SSL') as factory:
             mailbox = factory.return_value
             mailbox.select.return_value = ('OK', [b'3'])
             mailbox.response.return_value = ('UIDVALIDITY', [b'43'])
-            mailbox.uid.side_effect = lambda command, *args: (
-                ('OK', [b'1 2 3']) if command == 'SEARCH'
-                else ('OK', [(b'1 (BODY[] {size})', payloads[args[0].encode()])])
-            )
+            mailbox.uid.side_effect = fake_imap(payloads)
             result = service.sync_user_mailbox(self.owner)
         self.assertEqual(result['replies_found'], 0)
         self.assertFalse(self.sent.responded)
+
+    def test_headers_first_and_only_replies_fetched_in_full(self):
+        payloads = {n: incoming(f'news{n}@other.test', 'Newsletter', f'<n{n}@test>') for n in range(1, 251)}
+        payloads[251] = incoming('assistant@maple.test', 'Re: Intro', '<late-reply@test>', '<outbound@owner.test>')
+        calls = []
+        with patch.object(service.imaplib, 'IMAP4_SSL') as factory:
+            mailbox = factory.return_value
+            mailbox.select.return_value = ('OK', [b'251'])
+            mailbox.response.return_value = ('UIDVALIDITY', [b'44'])
+            mailbox.uid.side_effect = fake_imap(payloads, calls)
+            result = service.sync_user_mailbox(self.owner)
+        self.assertEqual(result['replies_found'], 1)
+        self.assertTrue(result['ready'])
+        self.assertEqual([wanted for kind, wanted in calls if kind == 'full'], [[251]])
+        self.assertEqual(len([1 for kind, _ in calls if kind == 'headers']), 3)  # 100 + 100 + 51
+        self.assertTrue(self.sent.responded)
+
+    def test_search_starts_the_day_before_the_first_send(self):
+        searches = []
+        base = fake_imap({})
+
+        def uid(command, *args):
+            if command == 'SEARCH':
+                searches.append(args)
+            return base(command, *args)
+        with patch.object(service.imaplib, 'IMAP4_SSL') as factory:
+            mailbox = factory.return_value
+            mailbox.select.return_value = ('OK', [b'0'])
+            mailbox.response.return_value = ('UIDVALIDITY', [b'45'])
+            mailbox.uid.side_effect = uid
+            service.sync_user_mailbox(self.owner)
+        expected = (self.sent.sent_at - timedelta(days=1)).strftime('%d-%b-%Y')
+        self.assertEqual(searches[0][-1], expected)
+
+    def test_no_tracked_sends_skips_the_scan_but_checks_the_login(self):
+        other = service.User.query.filter(service.User.id != self.owner.id).first()
+        with patch.object(service.imaplib, 'IMAP4_SSL') as factory:
+            mailbox = factory.return_value
+            mailbox.select.return_value = ('OK', [b'9'])
+            mailbox.response.return_value = ('UIDVALIDITY', [b'46'])
+            with patch.object(service, 'user_mail_password', return_value='app-password'):
+                result = service.sync_user_mailbox(other)
+            mailbox.login.assert_called_once()
+            mailbox.uid.assert_not_called()
+        self.assertTrue(result['ready'])
+        self.assertEqual(result['messages_checked'], 0)
 
     def test_failed_mailbox_check_stays_blocked(self):
         with patch.object(service.imaplib, 'IMAP4_SSL') as factory, patch.object(service.logging, 'exception'):
