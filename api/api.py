@@ -145,6 +145,7 @@ class User(db.Model):
     email_password = db.Column(db.String, nullable=True)  # Encrypted Gmail app password
     smtp_server = db.Column(db.String, default='smtp.gmail.com')
     smtp_port = db.Column(db.Integer, default=587)
+    commission_rate = db.Column(db.Numeric(5, 2), nullable=True)  # default % for this rep's closes
 
     def set_password(self, password):
         self.password_hash = generate_password_hash(password)
@@ -162,6 +163,29 @@ class EmployeeInvitation(db.Model):
     expires_at = db.Column(db.DateTime, nullable=False)
     used_at = db.Column(db.DateTime, nullable=True)
     revoked_at = db.Column(db.DateTime, nullable=True)
+
+class JoinLink(db.Model):
+    """A reusable sign-up link an administrator shares with new reps."""
+    __tablename__ = 'join_links'
+    id = db.Column(db.Integer, primary_key=True)
+    token_hash = db.Column(db.String(64), unique=True, nullable=False)
+    label = db.Column(db.String, nullable=True)
+    created_by = db.Column(db.Integer, db.ForeignKey('users.id', ondelete='CASCADE'), nullable=False)
+    created_at = db.Column(db.DateTime, nullable=False, default=lambda: utc_now())
+    expires_at = db.Column(db.DateTime, nullable=False)
+    revoked_at = db.Column(db.DateTime, nullable=True)
+    max_uses = db.Column(db.Integer, nullable=True)
+    use_count = db.Column(db.Integer, nullable=False, default=0)
+
+class CommissionSplit(db.Model):
+    """Who earns commission on a closed school. No rows means the closer earns 100%."""
+    __tablename__ = 'commission_splits'
+    id = db.Column(db.Integer, primary_key=True)
+    sales_school_id = db.Column(db.Integer, db.ForeignKey('sales_schools.id', ondelete='CASCADE'), nullable=False)
+    user_id = db.Column(db.Integer, db.ForeignKey('users.id', ondelete='CASCADE'), nullable=False)
+    share_pct = db.Column(db.Numeric(5, 2), nullable=False)
+    rate_pct = db.Column(db.Numeric(5, 2), nullable=True)  # null uses the rep's default rate
+    __table_args__ = (db.UniqueConstraint('sales_school_id', 'user_id', name='uq_commission_split'),)
 
 def utc_now():
     """UTC timestamp stored without timezone, matching the existing database columns."""
@@ -205,6 +229,7 @@ class SalesSchool(db.Model):
     lat = db.Column(db.Float, nullable=True)
     lng = db.Column(db.Float, nullable=True)
     website = db.Column(db.String, nullable=True)
+    deal_value = db.Column(db.Numeric(12, 2), nullable=True)  # administrator-only
 
     user = db.relationship('User', foreign_keys=[user_id], backref=db.backref('sales_schools', lazy=True))
     closed_by = db.relationship('User', foreign_keys=[closed_by_id])
@@ -995,18 +1020,32 @@ def register():
     phone = data.get("phone")
     password = data.get("password")
     invite_token = data.get("invite_token")
-    
-    if (not all([name, email, password, invite_token]) or
-            not isinstance(password, str) or not isinstance(invite_token, str) or
-            len(invite_token) > 256):
-        return jsonify({"error": "Missing required fields"}), 400
+    join_token = data.get("join_token")
 
-    token_hash = hashlib.sha256(invite_token.encode("utf-8")).hexdigest()
-    invitation = EmployeeInvitation.query.filter_by(token_hash=token_hash).with_for_update().first()
+    if (not all([name, email, password]) or not isinstance(password, str) or
+            not (invite_token or join_token)):
+        return jsonify({"error": "Missing required fields"}), 400
+    if len(name) > 120 or not re.fullmatch(r"[^@\s]+@[^@\s]+\.[^@\s]+", email):
+        return jsonify({"error": "Enter your name and a valid email address"}), 400
+    if len(password) < 8:
+        return jsonify({"error": "Use a password of at least 8 characters"}), 400
+    if phone is not None and (not isinstance(phone, str) or len(phone) > 50):
+        return jsonify({"error": "Enter a phone number under 50 characters"}), 400
+
     now = utc_now()
-    if (not invitation or invitation.email != email or invitation.used_at or
-            invitation.revoked_at or invitation.expires_at <= now):
-        return jsonify({"error": "Invalid or expired invitation"}), 403
+    invitation = link = None
+    if invite_token:
+        if not isinstance(invite_token, str) or len(invite_token) > 256:
+            return jsonify({"error": "Invalid or expired invitation"}), 403
+        token_hash = hashlib.sha256(invite_token.encode("utf-8")).hexdigest()
+        invitation = EmployeeInvitation.query.filter_by(token_hash=token_hash).with_for_update().first()
+        if (not invitation or invitation.email != email or invitation.used_at or
+                invitation.revoked_at or invitation.expires_at <= now):
+            return jsonify({"error": "Invalid or expired invitation"}), 403
+    else:
+        link = usable_join_link(JoinLink, join_token, lock=True)
+        if not link:
+            return jsonify({"error": "This sign-up link has expired. Ask your PSA administrator for a new one."}), 403
 
     if User.query.filter(func.lower(User.email) == email).first():
         return jsonify({"error": "Email already registered"}), 400
@@ -1014,14 +1053,17 @@ def register():
     user = User(name=name, email=email, phone=phone)
     user.set_password(password)
     db.session.add(user)
-    invitation.used_at = now
+    if link:
+        link.use_count += 1
+    if invitation:
+        invitation.used_at = now
     for other in EmployeeInvitation.query.filter(
         EmployeeInvitation.email == email,
-        EmployeeInvitation.id != invitation.id,
         EmployeeInvitation.used_at.is_(None),
         EmployeeInvitation.revoked_at.is_(None),
     ).all():
-        other.revoked_at = now
+        if other is not invitation:
+            other.revoked_at = now
     db.session.commit()
     
     return jsonify({"message": "User registered successfully"})
@@ -1089,10 +1131,12 @@ def revoke_invitation(invitation_id):
 
 @app.route("/api/login", methods=["POST"])
 def login():
-    data = request.get_json()
-    email = data.get("email")
-    password = data.get("password")
-    user = User.query.filter_by(email=email).first()
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict) or not isinstance(data.get("email"), str)             or not isinstance(data.get("password"), str):
+        return jsonify({"error": "Enter your email and password"}), 400
+    email = data["email"].strip().lower()
+    password = data["password"]
+    user = User.query.filter(func.lower(User.email) == email).first()
     if user and user.check_password(password):
         access_token = create_access_token(identity=str(user.id))
         return jsonify({
@@ -1106,7 +1150,7 @@ def login():
                 "mail_connected": bool(user.email_password)
             }
         })
-    return jsonify({"error": "Invalid credentials"}), 401
+    return jsonify({"error": "That email and password do not match. Check them and try again."}), 401
 
 @app.route("/api/profile", methods=["GET"])
 @jwt_required()
@@ -3044,6 +3088,9 @@ class _FinderHooks:
         names.discard('')
         return names
 
+
+from .admin_sales import register_admin_sales_routes, usable_join_link  # noqa: E402
+register_admin_sales_routes(app, db, User, SalesSchool, CommissionSplit, JoinLink, SchoolActivity)
 
 from .portfolio import register_portfolio_routes  # noqa: E402
 from .finder import register_finder_routes  # noqa: E402
