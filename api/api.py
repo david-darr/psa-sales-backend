@@ -3158,7 +3158,10 @@ class _FinderHooks:
 
 
 from .admin_sales import register_admin_sales_routes, usable_join_link  # noqa: E402
-register_admin_sales_routes(app, db, User, SalesSchool, CommissionSplit, JoinLink, SchoolActivity)
+register_admin_sales_routes(app, db, User, JoinLink)
+
+from .program_commissions import register_program_commissions  # noqa: E402
+ProgramCommission, ProgramCommissionEvent = register_program_commissions(app, db, User, SalesSchool)
 
 from .portfolio import register_portfolio_routes  # noqa: E402
 from .finder import register_finder_routes  # noqa: E402
