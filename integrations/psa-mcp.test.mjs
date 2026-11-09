@@ -52,7 +52,7 @@ test('MCP protocol: initialize, list, call, errors',async()=>{
  assert.match(init.result.instructions,/untrusted/);
  const listed=await handleMessage({jsonrpc:'2.0',id:2,method:'tools/list'},request);
  assert.equal(listed.result.tools.length,tools.length);
- assert.ok(tools.filter(t=>!t.annotations.readOnlyHint).every(t=>/write key/i.test(t.description)));
+ assert.ok(tools.filter(t=>!t.annotations.readOnlyHint).every(t=>/write key|Requires (?:schools:import|outreach:prepare|separately delegated outreach:send)/i.test(t.description)));
  assert.ok(!tools.some(t=>/send/.test(t.name)));
  const called=await handleMessage({jsonrpc:'2.0',id:3,method:'tools/call',params:{name:'psa_connection',arguments:{}}},request);
  assert.deepEqual(JSON.parse(called.result.content[0].text),{id:1});
@@ -60,4 +60,21 @@ test('MCP protocol: initialize, list, call, errors',async()=>{
  assert.equal(failed.result.isError,true);
  assert.equal(await handleMessage({jsonrpc:'2.0',method:'notifications/initialized'},request),null);
  assert.equal((await handleMessage({jsonrpc:'2.0',id:5,method:'resources/list'},request)).error.code,-32601);
+});
+
+test('approval tools never expose human approval or message overrides on execution',async()=>{
+ const {calls,request}=fake();
+ await callTool(request,'psa_prepare_outreach',{kind:'custom',school_ids:[1],subject:'Preview',body:'Hello'});
+ await callTool(request,'psa_execute_approved_outreach',{draft_id:'1234-safe'});
+ await callTool(request,'psa_import_commit',{import_id:'safe_import',file_hash:'a'.repeat(64)});
+ await callTool(request,'psa_reply_chain',{email_id:12});
+ assert.equal(calls[0].url,'https://psa.example.test/api/agent/v1/outreach/drafts');
+ assert.equal(calls[1].url,'https://psa.example.test/api/agent/v1/outreach/drafts/1234-safe/execute');
+ assert.deepEqual(JSON.parse(calls[1].init.body),{});
+ assert.equal(calls[2].url,'https://psa.example.test/api/agent/v1/imports/safe_import/commit');
+ assert.equal(calls[3].url,'https://psa.example.test/api/agent/v1/outreach/replies/12');
+ await assert.rejects(callTool(request,'psa_execute_approved_outreach',{draft_id:'../approve'}),/Invalid record ID/);
+ await assert.rejects(callTool(request,'psa_execute_approved_outreach',{draft_id:'safe',sender_id:2}),/Invalid tool arguments/);
+ await assert.rejects(callTool(request,'psa_approve_outreach',{draft_id:'safe'}),/Unknown tool/);
+ await assert.rejects(request('POST','/outreach/drafts/safe/approve',{}),/Invalid API path/);
 });

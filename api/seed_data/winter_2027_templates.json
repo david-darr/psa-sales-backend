@@ -1,0 +1,144 @@
+{
+  "source": "Players Sports Academy - Christopher Garabito, 2026-11-05 (v3)",
+  "cadence_days": [
+    0,
+    4,
+    10,
+    17
+  ],
+  "merge_fields": [
+    "{school name}",
+    "{my name}",
+    "{my email}"
+  ],
+  "templates": [
+    {
+      "name": "Winter 2027 - Principal / AP / school staff (short forward request) - Intro",
+      "kind": "initial",
+      "audience": "Principal / AP / school staff (short forward request)",
+      "send_on_day": 0,
+      "subject": "Winter enrichment for {school name}: Chess, Coding, Speech & Debate and more",
+      "body": "Hello,\n\nThis winter, Players Sports Academy (PSA) is offering indoor after-school favorites for elementary schools: Chess, Coding, Speech & Debate, Basketball, Volleyball and Ping Pong, with our full sports lineup always available.\n\nCould you forward this to whoever organizes after-school enrichment at {school name}, or share their contact with me? There's no cost to the school and no extra work for your staff.\n\nThank you,\n{my name}\nPlayers Sports Academy\n{my email} · thepsasports.com"
+    },
+    {
+      "name": "Winter 2027 - Principal / AP / school staff (short forward request) - Follow-up 1 (day 4)",
+      "kind": "followup",
+      "audience": "Principal / AP / school staff (short forward request)",
+      "send_on_day": 4,
+      "subject": "Re: Winter enrichment for {school name}",
+      "body": "Hello,\n\nJust a quick follow-up. Could you forward my note below to the person who handles after-school enrichment at {school name}?\n\nThank you!\n{my name}"
+    },
+    {
+      "name": "Winter 2027 - Principal / AP / school staff (short forward request) - Follow-up 2 (day 10)",
+      "kind": "followup",
+      "audience": "Principal / AP / school staff (short forward request)",
+      "send_on_day": 10,
+      "subject": "Re: Winter enrichment for {school name}",
+      "body": "Hello again,\n\nI know this is a busy time of year. If there's a PTA or enrichment contact for {school name}, a name or email would be a big help, and I'll take it from there.\n\nThank you,\n{my name}"
+    },
+    {
+      "name": "Winter 2027 - Principal / AP / school staff (short forward request) - Follow-up 3 (day 17, last touch)",
+      "kind": "followup",
+      "audience": "Principal / AP / school staff (short forward request)",
+      "send_on_day": 17,
+      "subject": "Re: Winter enrichment for {school name}",
+      "body": "Hello,\n\nOne last note so I don't crowd your inbox. If winter isn't the right fit, I'd be glad to reconnect about Spring. Thank you for everything you do for your students.\n\nBest,\n{my name}"
+    },
+    {
+      "name": "Winter 2027 - PTA / PTO officers (direct ask) - Intro",
+      "kind": "initial",
+      "audience": "PTA / PTO officers (direct ask)",
+      "send_on_day": 0,
+      "subject": "Indoor winter favorites for {school name} families",
+      "body": "Hi {school name} PTA team,\n\nLooking for indoor after-school options this winter? Players Sports Academy (PSA) brings our winter favorites right to your school:\n- Chess\n- Coding\n- Speech & Debate\n- Indoor sports: Basketball, Volleyball and Ping Pong\n\nOur full sports lineup is always available too. Programs run once a week for 6–8 weeks, right after dismissal.\n\nI'm {my name} with PSA, a Northern Virginia nonprofit that already partners with elementary schools across Fairfax and Loudoun. The setup is simple:\n- No cost to the school. Families register directly, and we share revenue back with your PTA.\n- No extra work for you. Our background-checked coaches bring all the equipment and handle registration, rosters and pickup.\n\nWould {school name} like a winter program? I'm happy to set up a quick 10-minute call or send over a one-page overview, whichever is easier.\n\nThank you,\n{my name}\nPlayers Sports Academy\n{my email} · thepsasports.com"
+    },
+    {
+      "name": "Winter 2027 - PTA / PTO officers (direct ask) - Follow-up 1 (day 4)",
+      "kind": "followup",
+      "audience": "PTA / PTO officers (direct ask)",
+      "send_on_day": 4,
+      "subject": "Re: Indoor winter favorites for {school name} families",
+      "body": "Hi again,\n\nI wanted to follow up on my note below about winter programs. If enrichment at {school name} is handled by someone else, like an ASEP or enrichment chair, I'd really appreciate you pointing me in the right direction.\n\nBest,\n{my name}"
+    },
+    {
+      "name": "Winter 2027 - PTA / PTO officers (direct ask) - Follow-up 2 (day 10)",
+      "kind": "followup",
+      "audience": "PTA / PTO officers (direct ask)",
+      "send_on_day": 10,
+      "subject": "Re: Indoor winter favorites for {school name} families",
+      "body": "Hi again,\n\nAs families start thinking about indoor activities for January and February, I wanted to check in once more. Chess, Coding and Speech & Debate are great options when it's too cold for recess sports. I'm happy to send the one-page overview with programs and how registration works.\n\nBest,\n{my name}"
+    },
+    {
+      "name": "Winter 2027 - PTA / PTO officers (direct ask) - Follow-up 3 (day 17, last touch)",
+      "kind": "followup",
+      "audience": "PTA / PTO officers (direct ask)",
+      "send_on_day": 17,
+      "subject": "Re: Indoor winter favorites for {school name} families",
+      "body": "Hi again,\n\nOne last check-in about winter programs at {school name}. If now isn't the right time, no problem at all, and I'm happy to reconnect about Spring. If you'd like the overview or have any questions, just reply here.\n\nThanks so much,\n{my name}"
+    },
+    {
+      "name": "Winter 2027 - Enrichment / ASEP / after-school coordinator (scheduling-focused) - Intro",
+      "kind": "initial",
+      "audience": "Enrichment / ASEP / after-school coordinator (scheduling-focused)",
+      "send_on_day": 0,
+      "subject": "Winter 2027 enrichment for {school name}: Chess, Coding, Speech & Debate and more",
+      "body": "Hello,\n\nI'd love for Players Sports Academy (PSA) to be considered for {school name}'s Winter 2027 enrichment session. Our winter favorites are indoor programs:\n- Chess\n- Coding\n- Speech & Debate\n- Basketball\n- Volleyball\n- Ping Pong\n\nOur full sports lineup is always available as well. Each program runs once a week for 6–8 weeks, right after dismissal, and we can run more than one program per week.\n\nWe handle everything: background-checked coaches, all equipment, registration, rosters and dismissal pickup. Families register directly with us, and we share revenue back with your PTA.\n\nWhat do your vendor process and timeline look like for winter? I'm happy to send a one-page overview or set up a quick call.\n\nThank you,\n{my name}\nPlayers Sports Academy\n{my email} · thepsasports.com"
+    },
+    {
+      "name": "Winter 2027 - Enrichment / ASEP / after-school coordinator (scheduling-focused) - Follow-up 1 (day 4)",
+      "kind": "followup",
+      "audience": "Enrichment / ASEP / after-school coordinator (scheduling-focused)",
+      "send_on_day": 4,
+      "subject": "Re: Winter 2027 enrichment for {school name}",
+      "body": "Hi again,\n\nFollowing up on my note below. If you're still putting your winter session together, could you share your deadline for vendor information? I'll make sure you have everything you need in time.\n\nBest,\n{my name}"
+    },
+    {
+      "name": "Winter 2027 - Enrichment / ASEP / after-school coordinator (scheduling-focused) - Follow-up 2 (day 10)",
+      "kind": "followup",
+      "audience": "Enrichment / ASEP / after-school coordinator (scheduling-focused)",
+      "send_on_day": 10,
+      "subject": "Re: Winter 2027 enrichment for {school name}",
+      "body": "Hi again,\n\nI'm happy to send short descriptions of our winter programs (Chess, Coding, Speech & Debate and indoor sports) that you can drop straight into your session flyer or registration page. Just let me know.\n\nBest,\n{my name}"
+    },
+    {
+      "name": "Winter 2027 - Enrichment / ASEP / after-school coordinator (scheduling-focused) - Follow-up 3 (day 17, last touch)",
+      "kind": "followup",
+      "audience": "Enrichment / ASEP / after-school coordinator (scheduling-focused)",
+      "send_on_day": 17,
+      "subject": "Re: Winter 2027 enrichment for {school name}",
+      "body": "Hi again,\n\nOne last note. If your winter lineup is already set, no problem at all. Could you add us to your list for Spring? I'm happy to send our program info whenever you start planning.\n\nThank you,\n{my name}"
+    },
+    {
+      "name": "Winter 2027 - Trunk-or-Treat contacts (warm) - Intro",
+      "kind": "initial",
+      "audience": "Trunk-or-Treat contacts (warm)",
+      "send_on_day": 0,
+      "subject": "Indoor winter favorites for {school name} families",
+      "body": "Hi {school name} team,\n\nI hope your fall events went well! PSA reached out in October about your Trunk-or-Treat, and this winter we're bringing our indoor after-school favorites to elementary schools:\n- Chess\n- Coding\n- Speech & Debate\n- Basketball\n- Volleyball\n- Ping Pong\n\nOur full sports lineup is always available as well. There's no cost to the school, we share revenue back with your PTA, and our background-checked coaches handle all the equipment, registration and pickup.\n\nWould you be open to a quick 10-minute call, or would a one-page overview be easier?\n\nThank you,\n{my name}\nPlayers Sports Academy\n{my email} · thepsasports.com"
+    },
+    {
+      "name": "Winter 2027 - Trunk-or-Treat contacts (warm) - Follow-up 1 (day 4)",
+      "kind": "followup",
+      "audience": "Trunk-or-Treat contacts (warm)",
+      "send_on_day": 4,
+      "subject": "Re: Indoor winter favorites for {school name} families",
+      "body": "Hi again,\n\nI wanted to follow up on my note below about winter programs. If enrichment at {school name} is handled by someone else, like an ASEP or enrichment chair, I'd really appreciate you pointing me in the right direction.\n\nBest,\n{my name}"
+    },
+    {
+      "name": "Winter 2027 - Trunk-or-Treat contacts (warm) - Follow-up 2 (day 10)",
+      "kind": "followup",
+      "audience": "Trunk-or-Treat contacts (warm)",
+      "send_on_day": 10,
+      "subject": "Re: Indoor winter favorites for {school name} families",
+      "body": "Hi again,\n\nAs families start thinking about indoor activities for January and February, I wanted to check in once more. Chess, Coding and Speech & Debate are great options when it's too cold for recess sports. I'm happy to send the one-page overview with programs and how registration works.\n\nBest,\n{my name}"
+    },
+    {
+      "name": "Winter 2027 - Trunk-or-Treat contacts (warm) - Follow-up 3 (day 17, last touch)",
+      "kind": "followup",
+      "audience": "Trunk-or-Treat contacts (warm)",
+      "send_on_day": 17,
+      "subject": "Re: Indoor winter favorites for {school name} families",
+      "body": "Hi again,\n\nOne last check-in about winter programs at {school name}. If now isn't the right time, no problem at all, and I'm happy to reconnect about Spring. If you'd like the overview or have any questions, just reply here.\n\nThanks so much,\n{my name}"
+    }
+  ]
+}

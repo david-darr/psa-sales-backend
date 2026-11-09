@@ -6,3 +6,6 @@ __pycache__/
 .pytest_cache/
 .venv/
 node_modules/
+
+# Reviewed campaign copy, not credentials.
+!api/seed_data/winter_2027_templates.json

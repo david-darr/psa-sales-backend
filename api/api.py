@@ -37,7 +37,7 @@ from email import policy
 import smtplib
 
 # Flask & Extensions
-from flask import Flask, request, jsonify
+from flask import Flask, request, jsonify, has_app_context
 from flask_mail import Mail, Message
 from flask_sqlalchemy import SQLAlchemy
 from sqlalchemy import func, or_, and_
@@ -215,13 +215,15 @@ class SalesSchool(db.Model):
     additional_emails = db.Column(db.Text, nullable=True)  # Store as JSON string
     phone = db.Column(db.String, nullable=True)
     address = db.Column(db.String, nullable=True)
+    county = db.Column(db.String(80), nullable=True)
     school_type = db.Column(db.String, nullable=False, default='preschool')
     status = db.Column(db.String, default='pending')
     notes = db.Column(db.Text, nullable=True)
     next_action = db.Column(db.String, nullable=True)
     next_action_at = db.Column(db.DateTime, nullable=True)
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
-    user_id = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=False)
+    user_id = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=True)
+    ownership_version = db.Column(db.Integer, nullable=False, default=0, server_default='0')
     # Closed-won tracking and finder/map data (migration 20261029_accounts_portfolio.sql).
     closed_at = db.Column(db.DateTime(timezone=True), nullable=True)
     closed_by_id = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=True)
@@ -262,6 +264,7 @@ class SalesSchool(db.Model):
             self.additional_emails = None
 
 class SentEmail(db.Model):
+    sequence_managed = db.Column(db.Boolean, nullable=False, default=False, server_default='false')
     __tablename__ = 'sent_emails'
     id = db.Column(db.Integer, primary_key=True)
     school_name = db.Column(db.String, nullable=False)
@@ -544,7 +547,7 @@ def extract_email_from_string(email_string):
 # ====================================================
 
 MAIL_SYNC_BATCH_LIMIT = 500  # headers scanned per check; full messages are fetched only for replies
-MAIL_HEADER_FIELDS = 'FROM DATE SUBJECT MESSAGE-ID IN-REPLY-TO REFERENCES AUTO-SUBMITTED PRECEDENCE LIST-ID'
+MAIL_HEADER_FIELDS = 'FROM DATE SUBJECT MESSAGE-ID IN-REPLY-TO REFERENCES AUTO-SUBMITTED PRECEDENCE LIST-ID CONTENT-TYPE'
 MAIL_SYNC_LOOKBACK_DAYS = 90
 MAIL_SYNC_FRESHNESS = timedelta(minutes=45)
 
@@ -711,6 +714,13 @@ def sync_user_mailbox(user, max_messages=MAIL_SYNC_BATCH_LIMIT):
                     message = BytesParser(policy=policy.default).parsebytes(payload)
                     message_id = (message.get('Message-ID') or '').strip() or f'imap:{user.id}:{validity}:{uid}'
                     record = None
+                    if message_id not in seen_ids and message.get_content_type() == 'multipart/report':
+                        result, full = mailbox.uid('FETCH', str(uid), '(BODY.PEEK[])')
+                        body = next((item[1] for item in (full or []) if isinstance(item, tuple)
+                                     and len(item) > 1 and isinstance(item[1], bytes)), None)
+                        if result != 'OK' or body is None:
+                            raise RuntimeError('Delivery report fetch failed')
+                        process_delivery_report(BytesParser(policy=policy.default).parsebytes(body), outbound_by_id, user.id)
                     if message_id not in seen_ids and _is_human_reply(message, user.email):
                         record = _reply_record(message, outbound_by_id, sent_by_address)
                     if record:
@@ -721,6 +731,11 @@ def sync_user_mailbox(user, max_messages=MAIL_SYNC_BATCH_LIMIT):
                             raise RuntimeError('Mailbox message fetch failed')
                         message = BytesParser(policy=policy.default).parsebytes(body)
                         received_at = _mail_date(message)
+                        from .mail_feedback import reply_signal
+                        signal = reply_signal(_plain_reply(message))
+                        if signal:
+                            record_mail_signal(record.school_email, signal, 'reply:' + hashlib.sha256(
+                                (str(user.id) + message_id).encode()).hexdigest(), 'Matched human reply requires outreach to stop', actor_id=user.id)
                         db.session.add(EmailReply(
                             sent_email_id=record.id,
                             reply_content=_plain_reply(message),
@@ -1344,6 +1359,7 @@ def school_dict(school):
     return {
         "id": school.id,
         "school_name": school.school_name,
+        "county": school.county or '',
         "contact_name": school.contact_name,
         "email": school.email,
         "additional_emails": additional,
@@ -1377,22 +1393,23 @@ def valid_email(value):
     return isinstance(value, str) and bool(re.fullmatch(r'[^@\s]+@[^@\s]+\.[^@\s]+', value.strip()))
 
 
-def school_conflict(name, address, emails, candidates=None):
+def school_conflict(name, address, emails, candidates=None, allow_shared=False):
     """Find an existing team assignment before another employee contacts it."""
     candidates = candidates if candidates is not None else SalesSchool.query.all()
-    wanted_emails = {normalized(item) for item in emails if normalized(item)}
-    for school in candidates:
-        if wanted_emails.intersection(normalized(item) for item in school.get_all_emails()):
-            return school
-        if normalized(school.school_name) == normalized(name) and address and school.address:
-            if normalized(school.address) == normalized(address):
-                return school
+    from .contacts import school_matches
+    exact, possible = school_matches(name, address, '', candidates)
+    if exact or possible:
+        return (exact or possible)[0]
+    if not allow_shared:
+        wanted = {normalized(item) for item in emails if normalized(item)}
+        return next((school for school in candidates if wanted.intersection(normalized(item) for item in school.get_all_emails())), None)
     return None
 
 
 def accessible_school(school_id):
     user = db.session.get(User, int(get_jwt_identity()))
-    school = db.session.get(SalesSchool, school_id)
+    query = SalesSchool.query.filter_by(id=school_id)
+    school = query.with_for_update().populate_existing().first() if request.method != 'GET' else query.first()
     if not user or not school or (not user.admin and school.user_id != user.id):
         return None, user
     return school, user
@@ -1434,6 +1451,7 @@ def school_timeline(school):
 @app.route("/api/add-school", methods=["POST"])
 @jwt_required()
 def add_school():
+    contact_write_lock()
     data = request.get_json(silent=True)
     if not isinstance(data, dict):
         return jsonify({"error": "A school record is required"}), 400
@@ -1450,6 +1468,9 @@ def add_school():
     contact_name = data.get("contact_name")
     phone = data.get("phone")
     address = data.get("address")
+    county = data.get('county', '')
+    if not isinstance(county, str) or len(county) > 80:
+        return jsonify(error='County must be text up to 80 characters'), 400
     school_type = data.get("school_type", "preschool")
     place_id = data.get("place_id")
     lat, lng, website = data.get("lat"), data.get("lng"), data.get("website")
@@ -1488,12 +1509,14 @@ def add_school():
             "existing_id": saved['id'], "owner_name": owner_name,
             "school_id": saved['id'] if same_owner else None,
         }), 409
-    existing = school_conflict(school_name, address, [email, *additional_emails])
+    if type(data.get('shared_contact_confirmed', False)) is not bool:
+        return jsonify(error='Shared contact confirmation must be true or false'), 400
+    existing = school_conflict(school_name, address, [email, *additional_emails], allow_shared=data.get('shared_contact_confirmed', False))
     
     if existing:
         return jsonify({
-            "error": f"School is already assigned to {existing.user.name}",
-            "existing_id": existing.id, "owner_name": existing.user.name,
+            "error": f"Possible duplicate or shared mailbox with a school assigned to {(existing.user.name if existing.user else 'Unassigned')}. Review before adding.",
+            "existing_id": existing.id, "owner_name": (existing.user.name if existing.user else 'Unassigned'),
             "school_id": existing.id if existing.user_id == int(user_id) else None,
         }), 409
     
@@ -1503,6 +1526,7 @@ def add_school():
         email=email,
         phone=phone,
         address=address,
+        county=county.strip(),
         school_type=school_type,
         user_id=user_id,
         place_id=place_id,
@@ -1562,7 +1586,7 @@ def sales_school_workspace(school_id):
     allowed = {
         'school_name', 'contact_name', 'email', 'additional_emails', 'phone',
         'address', 'school_type', 'status', 'notes', 'next_action', 'next_action_at', 'user_id',
-        'website',
+        'website', 'county',
     }
     if not isinstance(data, dict) or not data or any(key not in allowed for key in data):
         return jsonify({"error": "No valid school changes supplied"}), 400
@@ -1578,12 +1602,8 @@ def sales_school_workspace(school_id):
     ):
         return jsonify({"error": "Additional emails must be a list"}), 400
     if 'user_id' in data:
-        try:
-            new_owner = db.session.get(User, int(data['user_id']))
-        except (TypeError, ValueError):
-            new_owner = None
-        if not new_owner:
-            return jsonify({"error": "Employee not found"}), 400
+        if data['user_id'] is not None and (type(data['user_id']) is not int or not db.session.get(User, data['user_id'])):
+            return jsonify(error='Employee not found'), 400
     if 'next_action_at' in data:
         try:
             raw_date = data['next_action_at']
@@ -1598,21 +1618,25 @@ def sales_school_workspace(school_id):
             return jsonify({"error": f"{key.replace('_', ' ').title()} is required"}), 400
     if 'email' in data and not valid_email(data['email']):
         return jsonify({"error": "Enter a valid school email address"}), 400
-    for key in ('school_name', 'contact_name', 'email', 'phone', 'address', 'notes', 'next_action', 'website'):
+    for key in ('school_name', 'contact_name', 'email', 'phone', 'address', 'notes', 'next_action', 'website', 'county'):
         if key in data and data[key] is not None and not isinstance(data[key], str):
             return jsonify({"error": f"Invalid {key}"}), 400
+    if 'county' in data and (data['county'] is None or len(data['county']) > 80):
+        return jsonify(error='County must be text up to 80 characters'), 400
     if 'email' in data or 'school_name' in data or 'address' in data or 'additional_emails' in data:
+        contact_write_lock()
         candidate_emails = [data.get('email', school.email), *data.get('additional_emails', school.get_all_emails()[1:])]
         other = school_conflict(
             data.get('school_name', school.school_name), data.get('address', school.address),
-            candidate_emails, [item for item in SalesSchool.query.all() if item.id != school.id],
+            [item for item in candidate_emails if normalized(item) not in {normalized(old) for old in school.get_all_emails()}],
+            [item for item in SalesSchool.query.all() if item.id != school.id],
         )
         if other:
-            return jsonify({"error": f"School is already assigned to {other.user.name}"}), 409
+            return jsonify({"error": f"School is already assigned to {(other.user.name if other.user else 'Unassigned')}"}), 409
 
     changes = []
     for key in ('school_name', 'contact_name', 'email', 'phone', 'address', 'school_type',
-                'status', 'notes', 'next_action', 'website'):
+                'status', 'notes', 'next_action', 'website', 'county'):
         if key in data:
             value = data[key].strip() if isinstance(data[key], str) else data[key]
             if key == 'status':
@@ -1632,13 +1656,12 @@ def sales_school_workspace(school_id):
     if 'next_action_at' in data and school.next_action_at != next_at:
         school.next_action_at = next_at
         changes.append('next action date')
-    if 'user_id' in data and school.user_id != new_owner.id:
-        SalesTask.query.filter_by(school_id=school.id, status='open').update(
-            {SalesTask.user_id: new_owner.id, SalesTask.version: SalesTask.version + 1},
-            synchronize_session=False,
-        )
-        school.user_id = new_owner.id
-        changes.append(f'owner to {new_owner.name}')
+    if 'user_id' in data:
+        from .ownership import change_owner
+        # Lock before ownership mutation; queued sends are cancelled and in-flight sends block changes.
+        SalesSchool.query.filter_by(id=school.id).with_for_update().first()
+        if change_owner(db, school, data['user_id'], user, SalesTask, SchoolActivity):
+            changes.append('owner')
     if changes:
         db.session.add(SchoolActivity(
             sales_school_id=school.id, actor_id=user.id, kind='updated',
@@ -1714,7 +1737,7 @@ def get_schools():
             "id": item.id, "name": item.name, "address": item.address,
             "phone": item.phone, "contact": item.contact, "email": item.email,
             "sales_school_id": assigned.id if assigned and assigned.user_id == user_id else None,
-            "owner_name": assigned.user.name if assigned else None,
+            "owner_name": assigned.user.name if assigned and assigned.user else 'Unassigned' if assigned else None,
             "assigned": bool(assigned),
         })
     return jsonify(rows)
@@ -1724,6 +1747,7 @@ def get_schools():
 def upload_schools_csv():
     """Upload schools from CSV file - supports multiple emails per school and private schools"""
     try:
+        contact_write_lock()
         user_id = get_jwt_identity()
         
         if 'file' not in request.files:
@@ -2004,114 +2028,6 @@ def email_preview():
         'attachments': job['pdf_files']} for job in jobs])
 
 
-@app.route("/api/send-email", methods=["POST"])
-@app.route('/api/crm/outreach/send', methods=['POST'])
-@jwt_required()
-def send_email():
-    data = request.get_json(silent=True)
-    if not isinstance(data, dict):
-        return jsonify(error='Supply an outreach request'), 400
-    school_ids = data.get("school_ids", [])
-    if (not isinstance(school_ids, list) or not 1 <= len(school_ids) <= 100
-            or any(type(value) is not int or value < 1 for value in school_ids)):
-        return jsonify(error='Select between 1 and 100 schools'), 400
-    subject = data.get("subject", "Let's Connect! PSA Programs")
-    send_to_all_emails = data.get("send_to_all_emails") is True
-    if not isinstance(subject, str) or not subject.strip() or len(subject) > 240 or '\n' in subject or '\r' in subject:
-        return jsonify(error='Enter a valid email subject'), 400
-
-    print(f"DEBUG: Received school_ids: {school_ids}")
-
-    if not school_ids:
-        return jsonify({"error": "No schools selected"}), 400
-
-    user_id = get_jwt_identity()
-    user = User.query.get(user_id)
-
-    if not user:
-        return jsonify({"error": "User not found"}), 400
-
-    if not user.email_password:
-        return jsonify({"error": "Email settings not configured"}), 400
-
-    # Get selected schools
-    schools = SalesSchool.query.filter(
-        SalesSchool.id.in_(school_ids), SalesSchool.user_id == user_id
-    ).all()
-    if len(schools) != len(set(school_ids)):
-        return jsonify({"error": "Send only to schools assigned to you"}), 403
-
-    if not schools:
-        return jsonify({"error": "No valid schools found"}), 400
-
-    jobs = build_outreach_jobs(user, schools, subject, send_to_all_emails)
-
-    if request.path == '/api/crm/outreach/send' or data.get('preview_token'):
-        if not isinstance(data.get('preview_token'), str):
-            return jsonify(error='Review your messages before sending.'), 409
-        try:
-            review = outreach_review_signer().loads(data.get('preview_token') or '', max_age=900)
-        except BadSignature:
-            return jsonify(error='Your message review expired. Review the messages again.'), 409
-        if review.get('uid') != user.id or any(
-            review.get('fingerprints', {}).get(str(job['school'].id) + ':' + job['to_email']) != outreach_fingerprint(job)
-            for job in jobs
-        ):
-            return jsonify(error='A recipient or message changed. Review the messages again before sending.'), 409
-
-    # A blank or malformed address can never be delivered; report it instead of sending.
-    skipped_errors = [
-        f"Skipped {job['school'].school_name}: missing or invalid email address"
-        for job in jobs if not valid_email(job['to_email'])
-    ]
-    jobs = [job for job in jobs if valid_email(job['to_email'])]
-
-    print(f"DEBUG: Sending {len(jobs)} emails over a single SMTP connection")
-
-    # One login, one connection reused for every email in this request - this is what
-    # actually avoids the request timing out on large batches (previously each email
-    # opened its own SMTP connection, plus a blocking 3s sleep between sub-batches).
-    results = send_emails_over_connection(user.email, user_mail_password(user), user.name, jobs)
-
-    sent_count = 0
-    errors = list(skipped_errors)
-    schools_contacted = set()
-
-    for job, success, error in results:
-        school = job["school"]
-        if success:
-            record = SentEmail(
-                school_name=school.school_name,
-                school_email=job["to_email"],
-                user_id=user_id,
-                sales_school_id=school.id,
-                responded=False,
-                followup_sent=False
-            )
-            db.session.add(record)
-            record_outbound_message(record, job.get("message_id"), job["subject"], "outreach")
-            sent_count += 1
-            schools_contacted.add(school.id)
-        else:
-            errors.append(f"Failed to send to {school.school_name} ({job['to_email']}): {error}")
-
-    for school in schools:
-        if school.id in schools_contacted:
-            advance_school_stage(school)
-
-    try:
-        db.session.commit()
-        print(f"DEBUG: Committed {sent_count} sent emails")
-    except Exception as e:
-        db.session.rollback()
-        print(f"DEBUG: Commit error: {str(e)}")
-
-    return jsonify({
-        "status": f"{sent_count} emails sent successfully" if sent_count > 0 else "Failed to send emails",
-        "sent_count": sent_count,
-        "batches_processed": 1,
-        "errors": errors
-    })
 
 def render_body_parts(body):
     """
@@ -2154,7 +2070,7 @@ def encoded_pdf_payload(pdf_path):
 
 
 def build_email_message(from_email, from_name, to_email, subject, body, pdf_files,
-                        message_id=None, in_reply_to=None):
+                        message_id=None, in_reply_to=None, references=None):
     """Build a MIME message with PDF attachments (no network I/O)."""
     msg = MIMEMultipart('mixed')  # Specify multipart type
     msg['From'] = f"{from_name} <{from_email}>"
@@ -2163,7 +2079,7 @@ def build_email_message(from_email, from_name, to_email, subject, body, pdf_file
     msg['Message-ID'] = message_id or email.utils.make_msgid(domain=from_email.rsplit('@', 1)[-1])
     if in_reply_to:
         msg['In-Reply-To'] = in_reply_to
-        msg['References'] = in_reply_to
+        msg['References'] = references or in_reply_to
 
     # Set charset for the entire message
     msg.set_charset('utf-8')
@@ -2178,11 +2094,14 @@ def build_email_message(from_email, from_name, to_email, subject, body, pdf_file
     pdf_directory = os.path.join(os.path.dirname(__file__), 'pdf_attachments')
 
     for pdf_file in pdf_files:
-        pdf_path = os.path.join(pdf_directory, pdf_file)
-        encoded = encoded_pdf_payload(pdf_path)
-        if encoded is None:
-            print(f"WARNING: PDF file not found: {pdf_path}")
-            continue
+        if pdf_file.startswith('template-asset:'):
+            pdf_file, encoded = template_attachment_payload(pdf_file.split(':', 1)[1])
+        else:
+            pdf_path = os.path.join(pdf_directory, pdf_file)
+            encoded = encoded_pdf_payload(pdf_path)
+            if encoded is None:
+                print(f"WARNING: PDF file not found: {pdf_path}")
+                continue
         part = MIMEBase('application', 'pdf')
         part.set_payload(encoded)
         part['Content-Transfer-Encoding'] = 'base64'
@@ -2207,6 +2126,8 @@ def send_email_with_attachments(from_email, from_password, to_email, subject, bo
                                 from_name, message_id=None, in_reply_to=None):
     """Send a single email with PDF attachments over its own SMTP connection."""
     try:
+        if has_app_context() and contact_is_blocked(to_email, independent=True):
+            return False
         msg = build_email_message(
             from_email, from_name, to_email, subject, body, pdf_files,
             message_id=message_id, in_reply_to=in_reply_to,
@@ -2307,6 +2228,8 @@ class SmtpSender:
         while the message is in flight raises AmbiguousDelivery and is never resent here, because
         the provider may already have accepted it.
         """
+        if has_app_context() and contact_is_blocked(job['to_email'], independent=True):
+            raise ValueError('This mailbox is marked do not contact')
         # Each attachment message is a few MB in memory while it is built and flattened, so only
         # a few run at once per process no matter how many batches are active.
         if job["pdf_files"]:
@@ -2317,7 +2240,7 @@ class SmtpSender:
     def _build_and_send(self, job):
         msg = build_email_message(
             self.from_email, self.from_name, job["to_email"], job["subject"], job["body"],
-            job["pdf_files"], in_reply_to=job.get("in_reply_to"),
+            job["pdf_files"], in_reply_to=job.get("in_reply_to"), references=job.get('references'),
         )
         self._ensure_live_connection()
         try:
@@ -2384,6 +2307,8 @@ def mark_followup_sent(email_record):
 
 def followup_eligibility_error(email_record):
     """Use the same rule for the queue, preview, and final send."""
+    if email_record.sequence_managed:
+        return 'This conversation is managed by an explicitly enrolled sequence'
     if email_record.responded:
         return "This school has already responded"
     if followup_stage(email_record) >= len(FOLLOWUP_SCHEDULE_DAYS):
@@ -2455,63 +2380,6 @@ def followup_preview(email_id):
     })
 
 
-@app.route("/api/send-followup", methods=["POST"])
-@jwt_required()
-def send_followup():
-    data = request.get_json(silent=True) or {}
-    email_id = data.get("email_id")
-    
-    if not email_id:
-        return jsonify({"error": "Missing email_id"}), 400
-
-    user_id = get_jwt_identity()
-    user = User.query.get(user_id)
-    if not user or not user.email_password:
-        return jsonify({"error": "User not connected with email"}), 400
-
-    # Get the original email record
-    # Hold this row until the send result is recorded so a second request cannot
-    # send the same follow-up while the first SMTP call is still in flight.
-    original_email = SentEmail.query.filter_by(id=email_id, user_id=user_id).with_for_update().first()
-    if not original_email:
-        return jsonify({"error": "Email not found"}), 404
-
-    error = followup_eligibility_error(original_email)
-    if error:
-        return jsonify({"error": error}), 409
-    if not mail_sync_status(user.id)["ready"]:
-        return jsonify({"error": "Check your inbox before sending follow-ups"}), 409
-
-    followup_body = followup_message(user, original_email)
-
-    password = user_mail_password(user)
-    message_id = email.utils.make_msgid(domain=user.email.rsplit('@', 1)[-1])
-    latest = SentMessage.query.filter_by(sent_email_id=original_email.id).order_by(SentMessage.sent_at.desc()).first()
-    try:
-        # Use the same send_email_with_attachments function that works for regular emails
-        success = send_email_with_attachments(
-            from_email=user.email,
-            from_password=password,
-            to_email=original_email.school_email,
-            subject=FOLLOWUP_SUBJECT,
-            body=followup_body,
-            pdf_files=[],  # No attachments for follow-ups
-            from_name=user.name,
-            message_id=message_id,
-            in_reply_to=latest.message_id if latest else None,
-        )
-        
-        if success:
-            mark_followup_sent(original_email)
-            record_outbound_message(original_email, message_id, FOLLOWUP_SUBJECT, "followup")
-            db.session.commit()
-            return jsonify({"status": "follow-up sent"})
-        else:
-            return jsonify({"error": "Failed to send follow-up email"}), 500
-            
-    except Exception as e:
-        print(f"Error sending follow-up email: {str(e)}")
-        return jsonify({"error": f"Failed to send follow-up: {str(e)}"}), 500
 
 @app.route("/api/mark-responded", methods=["POST"])
 @jwt_required()
@@ -2896,240 +2764,8 @@ def get_all_emails():
 # API ENDPOINTS - CUSTOM REPLIES
 # ====================================================
 
-@app.route("/api/send-custom-reply", methods=["POST"])
-@jwt_required()
-def send_custom_reply():
-    """Send a custom reply to a school"""
-    data = request.get_json()
-    email_id = data.get("email_id")
-   
-    to_email = data.get("to_email")
-    subject = data.get("subject")
-    message = data.get("message")
-    
-    if not all([email_id, to_email, subject, message]):
-        return jsonify({"error": "Missing required fields"}), 400
 
-    user_id = get_jwt_identity()
-    user = User.query.get(user_id)
-    
-    if not user or not user.email_password:
-        return jsonify({"error": "User or email settings not configured"}), 400
 
-    # Replies must come from the original sender's mailbox so incoming mail
-    # stays in the same employee's conversation.
-    email_record = SentEmail.query.filter_by(id=email_id, user_id=user_id).first()
-    
-    if not email_record:
-        return jsonify({"error": "Email record not found"}), 404
-
-    password = user_mail_password(user)
-    message_id = email.utils.make_msgid(domain=user.email.rsplit('@', 1)[-1])
-    latest = SentMessage.query.filter_by(sent_email_id=email_record.id).order_by(SentMessage.sent_at.desc()).first()
-    try:
-        # Send the custom reply
-        success = send_email_with_attachments(
-            from_email=user.email,
-            from_password=password,
-            to_email=to_email,
-            subject=subject,
-            body=message,
-            pdf_files=[],  # No attachments for replies
-            from_name=user.name,
-            message_id=message_id,
-            in_reply_to=latest.message_id if latest else None,
-        )
-        
-        if success:
-            record_outbound_message(email_record, message_id, subject, "reply")
-            db.session.commit()
-            return jsonify({"status": "Custom reply sent successfully"})
-        else:
-            return jsonify({"error": "Failed to send custom reply"}), 500
-            
-    except Exception as e:
-        print(f"Error sending custom reply: {str(e)}")
-        return jsonify({"error": f"Failed to send custom reply: {str(e)}"}), 500
-
-@app.route("/api/send-custom-email", methods=["POST"])
-@jwt_required()
-def send_custom_email():
-    """Send a custom/freeform email to a school"""
-    ALLOWED_PDFS = {
-        "PSA TOTS seasonal flyer.pdf",
-        "PSA TOTS year round flyer.pdf",
-        "PSA TOTS Recommendation (Primrose School).pdf",
-        "PSA After School.pdf",
-        "PSA Recommendation (St. Theresa).pdf",
-        "PSA Recommendation Letter (Madison Trust ES).pdf",
-    }
-
-    data = request.get_json()
-    school_id = data.get("school_id")
-    to_email = data.get("to_email")
-    subject = data.get("subject")
-    message = data.get("message")
-    requested_pdfs = data.get("pdf_files", [])
-    pdf_files = [p for p in requested_pdfs if p in ALLOWED_PDFS]
-
-    if not all([school_id, to_email, subject, message]):
-        return jsonify({"error": "Missing required fields"}), 400
-
-    user_id = get_jwt_identity()
-    user = User.query.get(user_id)
-
-    if not user or not user.email_password:
-        return jsonify({"error": "User or email settings not configured"}), 400
-
-    school = SalesSchool.query.filter_by(id=school_id, user_id=user_id).first()
-
-    if not school:
-        return jsonify({"error": "School not found"}), 404
-
-    if not isinstance(to_email, str) or to_email.strip().casefold() not in {
-        item.strip().casefold() for item in school.get_all_emails()
-    }:
-        return jsonify({"error": "Choose a saved school contact"}), 400
-
-    def apply_vars(text):
-        return (text
-            .replace('[school_name]', school.school_name or '')
-            .replace('[contact_name]', school.contact_name or 'Director/Administrator')
-            .replace('[user_name]', user.name or '')
-            .replace('[user_email]', user.email or ''))
-
-    password = user_mail_password(user)
-    rendered_subject = apply_vars(subject)
-    message_id = email.utils.make_msgid(domain=user.email.rsplit('@', 1)[-1])
-    try:
-        success = send_email_with_attachments(
-            from_email=user.email,
-            from_password=password,
-            to_email=to_email,
-            subject=rendered_subject,
-            body=apply_vars(message),
-            pdf_files=pdf_files,
-            from_name=user.name,
-            message_id=message_id,
-        )
-
-        if success:
-            new_email = SentEmail(
-                school_name=school.school_name,
-                school_email=to_email,
-                user_id=user_id,
-                sales_school_id=school.id,
-                responded=False,
-                followup_sent=False
-            )
-            db.session.add(new_email)
-            record_outbound_message(new_email, message_id, rendered_subject, "outreach")
-            advance_school_stage(school)
-            db.session.commit()
-            return jsonify({"status": "Custom email sent successfully"})
-        else:
-            return jsonify({"error": "Failed to send email"}), 500
-
-    except Exception as e:
-        print(f"Error sending custom email: {str(e)}")
-        return jsonify({"error": f"Failed to send email: {str(e)}"}), 500
-
-@app.route("/api/send-custom-email-bulk", methods=["POST"])
-@jwt_required()
-def send_custom_email_bulk():
-    """Send a custom email to multiple schools using the same batching logic as send_email"""
-    ALLOWED_PDFS = {
-        "PSA TOTS seasonal flyer.pdf",
-        "PSA TOTS year round flyer.pdf",
-        "PSA TOTS Recommendation (Primrose School).pdf",
-        "PSA After School.pdf",
-        "PSA Recommendation (St. Theresa).pdf",
-        "PSA Recommendation Letter (Madison Trust ES).pdf",
-    }
-
-    data = request.get_json(silent=True)
-    if not isinstance(data, dict):
-        return jsonify(error='Supply an outreach request'), 400
-    school_ids = data.get("school_ids", [])
-    if (not isinstance(school_ids, list) or not 1 <= len(school_ids) <= 100
-            or any(type(value) is not int or value < 1 for value in school_ids)):
-        return jsonify(error='Select between 1 and 100 schools'), 400
-    subject = data.get("subject")
-    message = data.get("message")
-    requested_pdfs = data.get("pdf_files", [])
-    pdf_files = [p for p in requested_pdfs if p in ALLOWED_PDFS]
-
-    if not school_ids or not subject or not message:
-        return jsonify({"error": "Missing required fields"}), 400
-
-    user_id = get_jwt_identity()
-    user = User.query.get(user_id)
-
-    if not user or not user.email_password:
-        return jsonify({"error": "User or email settings not configured"}), 400
-
-    schools = SalesSchool.query.filter(
-        SalesSchool.id.in_(school_ids), SalesSchool.user_id == user_id
-    ).all()
-    if len(schools) != len(set(school_ids)):
-        return jsonify({"error": "Send only to schools assigned to you"}), 403
-
-    if not schools:
-        return jsonify({"error": "No valid schools found"}), 400
-
-    jobs = []
-    for school in schools:
-        def apply_vars(text, s=school):
-            return (text
-                .replace('[school_name]', s.school_name or '')
-                .replace('[contact_name]', s.contact_name or 'Director/Administrator')
-                .replace('[user_name]', user.name or '')
-                .replace('[user_email]', user.email or ''))
-
-        jobs.append({
-            "school": school,
-            "to_email": school.email,
-            "subject": apply_vars(subject),
-            "body": apply_vars(message),
-            "pdf_files": pdf_files
-        })
-
-    # One login, one connection reused for every email in this request instead of one
-    # SMTP connection per school (see send_emails_over_connection).
-    results = send_emails_over_connection(user.email, user_mail_password(user), user.name, jobs)
-
-    sent_count = 0
-    errors = []
-
-    for job, success, error in results:
-        school = job["school"]
-        if success:
-            record = SentEmail(
-                school_name=school.school_name,
-                school_email=job["to_email"],
-                user_id=user_id,
-                sales_school_id=school.id,
-                responded=False,
-                followup_sent=False
-            )
-            db.session.add(record)
-            record_outbound_message(record, job.get("message_id"), job["subject"], "outreach")
-            advance_school_stage(school)
-            sent_count += 1
-        else:
-            errors.append(f"Failed to send to {school.school_name}: {error}")
-
-    try:
-        db.session.commit()
-    except Exception as e:
-        db.session.rollback()
-        print(f"Commit error: {str(e)}")
-
-    return jsonify({
-        "status": f"{sent_count} emails sent successfully" if sent_count > 0 else "Failed to send emails",
-        "sent_count": sent_count,
-        "errors": errors
-    })
 
 # ====================================================
 # APPLICATION STARTUP
@@ -3148,6 +2784,7 @@ class _FinderHooks:
     school_conflict = staticmethod(lambda *args: school_conflict(*args))
     valid_email = staticmethod(lambda value: valid_email(value))
     sleep = staticmethod(lambda seconds: time.sleep(seconds))
+    contact_lock = staticmethod(lambda: contact_write_lock())
 
     @staticmethod
     def partner_names():
@@ -3160,6 +2797,9 @@ class _FinderHooks:
 from .admin_sales import register_admin_sales_routes, usable_join_link  # noqa: E402
 register_admin_sales_routes(app, db, User, JoinLink)
 
+from .contacts import register_contacts  # noqa: E402
+Contact, SchoolContact, ContactEvent, ContactImport, contact_is_blocked, contact_write_lock = register_contacts(app, db, User, SalesSchool, SchoolActivity)
+
 from .program_commissions import register_program_commissions  # noqa: E402
 ProgramCommission, ProgramCommissionEvent = register_program_commissions(app, db, User, SalesSchool)
 
@@ -3169,6 +2809,24 @@ register_portfolio_routes(app, db, User, SalesSchool, SchoolActivity, SentEmail,
 register_finder_routes(app, db, SalesSchool, User, _FinderHooks)
 
 import sys as _sys
+from .template_library import register_templates  # noqa: E402
+MailTemplate, MailTemplateVersion, TemplateAsset, resolve_mail_template, template_attachment_payload, select_catalog_attachments = register_templates(app, db, User)
+
+
+# All manual sends use a reviewed batch. Retired endpoints fail explicitly;
+# leaving the old synchronous implementation callable would bypass quotas,
+# canonical contact reservations, and per-recipient audit records.
+@app.post('/api/crm/outreach/send')
+@app.post('/api/send-email')
+@app.post('/api/send-followup')
+@app.post('/api/send-custom-email')
+@app.post('/api/send-custom-email-bulk')
+@app.post('/api/send-custom-reply')
+@jwt_required()
+def retired_synchronous_send():
+    return jsonify(error='Review and send from Outreach. This older send endpoint has been retired.',
+                   code='review_required'), 409
+
 from .outreach import register_outreach_routes, run_auto_followups  # noqa: E402,F401
 register_outreach_routes(app, db, _sys.modules[__name__])
 

@@ -13,7 +13,7 @@ can be revoked. Every request is audited (key, employee, route, status) without
 request or response content. The audit table also backs the per-key rate limit,
 so the limit holds across worker processes.
 
-Email sending is not exposed in v1: outreach is read-only.
+New outreach permissions are opt-in and require a separate human batch approval.
 """
 
 import hashlib
@@ -30,13 +30,14 @@ KEY_PREFIX = 'psak_'
 KEY_PATTERN = re.compile(r'^psak_[0-9a-f]{64}$')
 EXPIRY_DAYS = (7, 30, 90)
 SCOPES = {'read': 'read', 'write': 'read,write'}
+CAPABILITIES = ('schools:import', 'outreach:read', 'outreach:prepare', 'outreach:send')
 MAX_ACTIVE_KEYS = 10
 RATE_LIMIT_PER_MINUTE = 60
 MAX_BODY_BYTES = 32 * 1024
 BASE = '/api/agent/v1'
 
 # Query parameters each read endpoint forwards to the underlying handler.
-SCHOOL_FILTERS = ('q', 'stage', 'owner', 'type', 'due', 'sort', 'page', 'limit', 'scope', 'today')
+SCHOOL_FILTERS = ('q', 'stage', 'owner', 'type', 'due', 'sort', 'page', 'limit', 'scope', 'today', 'county')
 TASK_FILTERS = ('view', 'school_id', 'page', 'limit', 'scope', 'today')
 SCHOOL_UPDATE_FIELDS = ('status', 'next_action', 'next_action_at', 'user_id')
 
@@ -57,7 +58,7 @@ def register_agent_api(app, db, User, utc_now):
         name = db.Column(db.String(80), nullable=False)
         key_hash = db.Column(db.String(64), unique=True, nullable=False)
         key_hint = db.Column(db.String(20), nullable=False)
-        scopes = db.Column(db.String(40), nullable=False, default='read')
+        scopes = db.Column(db.String(255), nullable=False, default='read')
         created_at = db.Column(db.DateTime, nullable=False, default=lambda: utc_now())
         expires_at = db.Column(db.DateTime, nullable=False)
         revoked_at = db.Column(db.DateTime)
@@ -78,6 +79,7 @@ def register_agent_api(app, db, User, utc_now):
         return {
             'id': key.id, 'name': key.name, 'hint': key.key_hint,
             'scope': 'write' if 'write' in key.scopes.split(',') else 'read',
+            'capabilities': [s for s in key.scopes.split(',') if s in CAPABILITIES],
             'created_at': key.created_at.isoformat() + 'Z',
             'expires_at': key.expires_at.isoformat() + 'Z',
             'last_used_at': key.last_used_at.isoformat() + 'Z' if key.last_used_at else None,
@@ -105,22 +107,28 @@ def register_agent_api(app, db, User, utc_now):
                     AgentApiKey.revoked_at.is_(None)).order_by(AgentApiKey.created_at.desc(), AgentApiKey.id.desc()).all()
                 return jsonify(items=[key_dict(key) for key in keys], base_url=request.host_url.rstrip('/') + BASE)
             data = request.get_json(silent=True)
-            if not isinstance(data, dict) or set(data) - {'name', 'scope', 'expires_in_days'}:
+            if not isinstance(data, dict) or set(data) - {'name', 'scope', 'expires_in_days', 'capabilities', 'confirm_send'}:
                 return jsonify(error='Supply a name, scope and expiry'), 400
             name = data.get('name')
             if not isinstance(name, str) or not 1 <= len(name.strip()) <= 80:
                 return jsonify(error='Enter a key name under 80 characters'), 400
-            if data.get('scope') not in SCOPES:
+            if not isinstance(data.get('scope'),str) or data.get('scope') not in SCOPES:
                 return jsonify(error='Choose read or write access'), 400
             if data.get('expires_in_days') not in EXPIRY_DAYS or type(data.get('expires_in_days')) is not int:
                 return jsonify(error='Choose an expiry of 7, 30 or 90 days'), 400
+            capabilities=data.get('capabilities',[])
+            if not isinstance(capabilities,list) or len(capabilities)>len(CAPABILITIES) or any(c not in CAPABILITIES for c in capabilities):
+                return jsonify(error='Choose valid additional permissions'),400
+            if 'outreach:send' in capabilities and data.get('confirm_send') is not True:
+                return jsonify(error='Explicitly delegate execution of human-approved batches'),400
+            db.session.query(User.id).filter_by(id=user.id).with_for_update().first()
             active = AgentApiKey.query.filter(AgentApiKey.user_id == user.id, AgentApiKey.revoked_at.is_(None),
                                               AgentApiKey.expires_at > utc_now()).count()
             if active >= MAX_ACTIVE_KEYS:
                 return jsonify(error=f'You can have up to {MAX_ACTIVE_KEYS} active keys. Revoke one first.'), 400
             token = KEY_PREFIX + secrets.token_hex(32)
             key = AgentApiKey(user_id=user.id, name=name.strip(), key_hash=hash_key(token),
-                              key_hint=token[:9] + '...' + token[-4:], scopes=SCOPES[data['scope']],
+                              key_hint=token[:9] + '...' + token[-4:], scopes=','.join([SCOPES[data['scope']],*sorted(set(capabilities))]),
                               expires_at=utc_now() + timedelta(days=data['expires_in_days']))
             db.session.add(key)
             db.session.commit()
@@ -148,7 +156,7 @@ def register_agent_api(app, db, User, utc_now):
 
     # -- Agent requests ----------------------------------------------------------
 
-    def authenticate(write):
+    def authenticate(write, required_scope=None):
         """Return (key, user, None) or (None, None, error response)."""
         if not enabled():
             return None, None, (jsonify(error='The PSA agent API is turned off'), 503)
@@ -175,6 +183,8 @@ def register_agent_api(app, db, User, utc_now):
             return key, user, (response, 429)
         if write and 'write' not in key.scopes.split(','):
             return key, user, (jsonify(error='This key is read-only'), 403)
+        if required_scope and required_scope not in key.scopes.split(','):
+            return key,user,(jsonify(error=f'This key requires {required_scope} permission'),403)
         if request.content_length and request.content_length > MAX_BODY_BYTES:
             return key, user, (jsonify(error='Request too large'), 413)
         return key, user, None
@@ -206,10 +216,10 @@ def register_agent_api(app, db, User, utc_now):
             response = app.make_response(view(**(view_args or {})))
         return response.get_json(silent=True), response.status_code
 
-    def agent_route(rule, methods, name, write=False):
+    def agent_route(rule, methods, name, write=False, required_scope=None):
         def wrap(handler):
             def endpoint(**kwargs):
-                key, user, error = authenticate(write or request.method != 'GET')
+                key, user, error = authenticate((write or request.method != 'GET') if not required_scope else False,required_scope)
                 if error:
                     response, status = error
                     if key is not None:
@@ -241,7 +251,7 @@ def register_agent_api(app, db, User, utc_now):
         return {'id': user.id, 'name': user.name, 'email': user.email,
                 'role': 'admin' if user.admin else 'rep', 'admin': bool(user.admin),
                 'api_version': 'v1', 'key': {k: v for k, v in key_dict(g.agent_key).items()
-                                             if k in ('name', 'scope', 'expires_at')}}, 200
+                                             if k in ('name', 'scope', 'capabilities', 'expires_at')}}, 200
 
     @agent_route('/team', ['GET'], 'team')
     def agent_team(user):
@@ -325,4 +335,7 @@ def register_agent_api(app, db, User, utc_now):
             payload = {'available': True, 'summary': payload.get('summary'), 'reps': payload.get('reps')}
         return payload, status
 
+    from .agent_workflows import register_agent_workflows
+    import sys
+    register_agent_workflows(app,db,sys.modules[User.__module__],AgentApiKey,agent_route,delegate)
     return AgentApiKey, AgentApiAudit

@@ -2,6 +2,7 @@
 import {createInterface} from 'node:readline';
 import {pathToFileURL} from 'node:url';
 import {createPsaClient} from './psa-client.mjs';
+import {workflowTools,workflowRoutes} from './agent-workflow-tools.mjs';
 
 const string={type:'string'},id={type:'integer',minimum:1},date={type:'string',format:'date-time',description:'ISO 8601 with UTC offset'};
 const day={type:'string',format:'date',description:'YYYY-MM-DD in the viewer\'s local calendar'};
@@ -9,7 +10,7 @@ const page={page:{type:'integer',minimum:1},limit:{type:'integer',minimum:1,maxi
 const scope={enum:['mine','team'],description:'Administrators see the team by default; mine limits to their own records'};
 const stage={enum:['pending','contacted','replied','meeting','partner','former','not_interested']};
 function tool(name,description,properties={},required=[],readOnly=true){return {name,description,inputSchema:{type:'object',properties,required,additionalProperties:false},annotations:{readOnlyHint:readOnly,destructiveHint:false,idempotentHint:readOnly,openWorldHint:false}}}
-export const tools=[
+export const tools=[...workflowTools,
  tool('psa_connection','Identify the connected PSA Sales employee, role (admin or rep), key scope and expiry.'),
  tool('psa_team','Administrators: list reps with school, email, reply and overdue task counts.',{today:day}),
  tool('psa_pipeline','Pipeline summary: stage counts, response rate, due follow-ups, open and overdue tasks, upcoming actions, recent activity. Reps see their own; admins see the team.',{scope,today:day}),
@@ -21,18 +22,21 @@ export const tools=[
  tool('psa_tasks','List sales tasks. view: open (default), today, overdue, upcoming, completed.',{view:{enum:['open','today','overdue','upcoming','completed']},school_id:id,scope,today:day,...page}),
  tool('psa_create_task','Create a sales task. Reps create their own; admins may assign user_id. A school task must belong to the school\'s owner. Requires a write key.',{title:{type:'string',minLength:1,maxLength:240},user_id:id,school_id:id,due_at:{anyOf:[date,{type:'null'}]},priority:{enum:['normal','high']}},['title'],false),
  tool('psa_update_task','Complete, reopen or reschedule a task using its latest version. A stale version returns 409: fetch again and review before retrying. Requires a write key.',{task_id:id,version:{type:'integer',minimum:1},status:{enum:['open','completed']},due_at:{anyOf:[date,{type:'null'}]}},['task_id','version'],false),
- tool('psa_outreach','Recent outreach batches with delivery counts. Read-only; the API never sends email.',{limit:{type:'integer',minimum:1,maximum:50},scope}),
+ tool('psa_outreach','Read recent outreach batches with delivery counts.',{limit:{type:'integer',minimum:1,maximum:50},scope}),
  tool('psa_outreach_batch','Read one outreach batch with per-recipient status.',{batch_id:id},['batch_id']),
  tool('psa_accounts','Administrators: closed-won accounts and pipeline counts by rep.',{scope}),
  tool('psa_commissions','Administrators: commission summary by rep, optionally for a date range. Returns available false until the commissions feature is live.',{from:day,to:day})
 ];
 const routes={psa_connection:['GET','/me'],psa_team:['GET','/team'],psa_pipeline:['GET','/pipeline'],psa_schools:['GET','/schools'],psa_school:['GET',a=>`/schools/${a.school_id}`],psa_update_school:['PATCH',a=>`/schools/${a.school_id}`],psa_assign_schools:['POST','/schools/assign'],psa_log_activity:['POST',a=>`/schools/${a.school_id}/activities`],psa_tasks:['GET','/tasks'],psa_create_task:['POST','/tasks'],psa_update_task:['PATCH',a=>`/tasks/${a.task_id}`],psa_outreach:['GET','/outreach'],psa_outreach_batch:['GET',a=>`/outreach/${a.batch_id}`],psa_accounts:['GET','/accounts'],psa_commissions:['GET','/commissions']};
+Object.assign(routes,workflowRoutes);
+Object.assign(routes,{psa_cancel_outreach:['POST',a=>`/outreach/${a.batch_id}/cancel`],psa_sequences:['GET','/outreach/sequences'],psa_enrollments:['GET','/outreach/enrollments'],psa_cancel_enrollment:['POST',a=>`/outreach/enrollments/${a.enrollment_id}/cancel`]});
 export const toolRoutes=routes;
 export async function callTool(request,name,args={}){
  const definition=tools.find(t=>t.name===name);if(!definition)throw new Error('Unknown tool');
  if(!args||typeof args!=='object'||Array.isArray(args)||Object.keys(args).some(k=>!Object.hasOwn(definition.inputSchema.properties,k))||definition.inputSchema.required.some(k=>!Object.hasOwn(args,k)))throw new Error('Invalid tool arguments');
- const {school_id,task_id,batch_id,...body}=args;
- for(const value of [school_id,task_id,batch_id])if(value!==undefined&&!(Number.isInteger(value)&&value>0))throw new Error('Invalid record ID');
+ const {school_id,task_id,batch_id,email_id,enrollment_id,draft_id,import_id,...body}=args;
+ for(const value of [school_id,task_id,batch_id,email_id,enrollment_id])if(value!==undefined&&!(Number.isInteger(value)&&value>0))throw new Error('Invalid record ID');
+ for(const value of [draft_id,import_id])if(value!==undefined&&(typeof value!=='string'||!/^[A-Za-z0-9_-]{1,100}$/.test(value)))throw new Error('Invalid record ID');
  const [method,path]=routes[name];
  return request(method,typeof path==='function'?path(args):path,body);
 }

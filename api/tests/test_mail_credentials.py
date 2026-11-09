@@ -63,11 +63,17 @@ class MailCredentialTests(unittest.TestCase):
         self.assertNotIn(secret, stored)
         self.assertEqual(service.user_mail_password(self.staff), secret)
 
-        with patch.object(service, "send_emails_over_connection", return_value=[]) as send:
-            self.client.post(
-                "/api/send-email", json={"school_ids": [self.school.id]}, headers=self.auth()
-            )
-        self.assertEqual(send.call_args.args[1], secret)
+        from api import outreach
+        payload = dict(school_ids=[self.school.id], kind='initial', attachment_ids=[])
+        review = self.client.post('/api/email-preview', headers=self.auth(), json=payload).get_json()
+        with patch.object(outreach, 'start_worker'):
+            queued = self.client.post('/api/outreach/batches', headers=self.auth(), json={**payload, 'preview_token': review['preview_token']})
+        self.assertEqual(queued.status_code, 202, queued.get_json())
+        batch = service.db.session.get(outreach.OutreachBatch, queued.get_json()['batch_id'])
+        bid, token = batch.id, batch.worker_token
+        with patch.object(service, 'open_smtp_connection') as opener:
+            outreach.run_batch(service.app, bid, token, delay=0)
+            self.assertEqual(opener.call_args.args[1], secret)
 
     def test_imap_receives_decrypted_value(self):
         self.staff.email_password = service.encrypt_password("imap-test-password")
@@ -130,7 +136,7 @@ class MailCredentialTests(unittest.TestCase):
             result = self.client.post(
                 "/api/send-email", json={"school_ids": [self.school.id]}, headers=self.auth()
             )
-            self.assertEqual(result.status_code, 503)
+            self.assertEqual(result.status_code, 409)
             self.assertNotIn("legacy-test-password", result.get_data(as_text=True))
 
         self.staff.email_password = "fernet:v1:invalid-token"

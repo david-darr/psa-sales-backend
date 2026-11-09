@@ -49,7 +49,7 @@ class SavedIndex:
             self.add(*row)
 
     def add(self, school_id, name, address, place_id, lat, lng, owner_id, owner_name):
-        entry = {'id': school_id, 'owner_id': owner_id, 'owner_name': owner_name,
+        entry = {'id': school_id, 'owner_id': owner_id, 'owner_name': owner_name or 'Unassigned',
                  'address': self.normalize_name(address), 'lat': lat, 'lng': lng}
         if place_id:
             self.by_place.setdefault(place_id, entry)
@@ -77,7 +77,7 @@ class SavedIndex:
 def load_saved_index(db, SalesSchool, User, normalize_name, haversine):
     rows = db.session.query(
         SalesSchool.id, SalesSchool.school_name, SalesSchool.address, SalesSchool.place_id,
-        SalesSchool.lat, SalesSchool.lng, SalesSchool.user_id, User.name).join(
+        SalesSchool.lat, SalesSchool.lng, SalesSchool.user_id, User.name).outerjoin(
         User, User.id == SalesSchool.user_id).all()
     return SavedIndex([tuple(row) for row in rows], normalize_name, haversine)
 
@@ -354,6 +354,7 @@ def register_finder_routes(app, db, SalesSchool, User, hooks):
                 if not owner:
                     return jsonify(error='Employee not found'), 400
 
+        hooks.contact_lock()
         index = load_saved_index(db, SalesSchool, User, hooks.normalize_name, hooks.haversine)
         candidates = None  # loaded only when a school carries an email address
         created, skipped = [], []
@@ -386,9 +387,9 @@ def register_finder_routes(app, db, SalesSchool, User, hooks):
             if not existing and email:
                 if candidates is None:
                     candidates = SalesSchool.query.all()
-                clash = hooks.school_conflict(name, address, [email], candidates)
+                clash = hooks.school_conflict(name, address, [email], candidates, item.get('shared_contact_confirmed') is True)
                 if clash:
-                    existing = {'id': clash.id, 'owner_id': clash.user_id, 'owner_name': clash.user.name}
+                    existing = {'id': clash.id, 'owner_id': clash.user_id, 'owner_name': clash.user.name if clash.user else 'Unassigned'}
             if existing:
                 skipped.append({
                     'place_id': place_id, 'reason': 'duplicate',
