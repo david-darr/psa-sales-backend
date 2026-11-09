@@ -1,6 +1,6 @@
-# Approve-once campaigns: local draft, 2026-11-08
+# Approve-once campaigns: feature branch, 2026-11-09
 
-Previous items were committed locally as backend d30c7f3 and frontend 1728ace. This item is a new uncommitted draft. No pushes, production migrations, hosted worker activation or real mail were performed.
+Campaign and scoped-chat work is committed and pushed on feature/contact-foundation (backend 579484c, frontend 791f76f). Production migrations, hosted worker activation and live mail remain pending. See RELEASE_20261109.md for the current preflight and cutover sequence.
 
 ## Employee experience in Kairos
 
@@ -31,9 +31,9 @@ Human JWT routes use /api/outreach/campaign-plans, /{id}, /{id}/summary and /{id
 
 ## Local verification and rollout boundary
 
-339 backend tests and seven Node bridge tests pass. Includes the Kairos private-session path, campaign snapshots, scope/expiry changes, cap/window limits, pause/resume/cancel, sticky stage stops, cancellation releasing unsent reservations, delayed feedback, unconfirmed SMTP outcomes, a 110-contact preview, fair scheduling and threaded follow-ups. Native JavaScript syntax passes. The prior frontend commit passed lint/build and admin/employee approval demo checks; the React app is unchanged in this item.
+350 backend tests and nine Node bridge tests pass. Includes the Kairos private-session path, campaign snapshots, scope/expiry changes, cap/window limits, pause/resume/cancel, sticky stage stops, cancellation releasing unsent reservations, delayed feedback, unconfirmed SMTP outcomes, a 110-contact preview, fair scheduling and threaded follow-ups. Native JavaScript syntax passes. The prior frontend commit passed lint/build and admin/employee approval demo checks; the frontend also contains the reviewed outreach navigation and AI-neutral setup improvements.
 
-The disposable PostgreSQL check applies the migration twice, verifies RLS and public-role grants, races human approvals, races scheduling/workers and races cancellation with scheduling. Ten socket-SMTP messages arrive once each; a restarted worker sends nothing cancelled. No Gmail or remote database is used. Rendered review of the native campaign pane is still pending; syntax and API tests are not visual acceptance.
+The disposable PostgreSQL check applies the migration twice, verifies RLS and public-role grants, races human approvals, races scheduling/workers and races cancellation with scheduling. Ten socket-SMTP messages arrive once each; a restarted worker sends nothing cancelled. No Gmail or remote database is used. The native campaign pane was inspected in an isolated fictional-data renderer. Signed-in acceptance in the actual Kairos installation and the mobile outreach selector remain pending.
 
 Apply all previous item migrations and then api/migrations/20261108_approved_campaigns.sql before releasing the compatible web API and dedicated worker. CAMPAIGN_AUTOMATION_ENABLED defaults false and must be explicitly enabled as a separate rollout action after controlled employee-owned live testing. Nothing here provisions a worker, connects Chris's installation or authorizes a live campaign. Keep the old automatic follow-up dispatcher disabled during cutover as documented in DURABLE_SEQUENCES.md.
 
