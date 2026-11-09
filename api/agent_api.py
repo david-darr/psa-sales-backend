@@ -30,7 +30,8 @@ KEY_PREFIX = 'psak_'
 KEY_PATTERN = re.compile(r'^psak_[0-9a-f]{64}$')
 EXPIRY_DAYS = (7, 30, 90)
 SCOPES = {'read': 'read', 'write': 'read,write'}
-CAPABILITIES = ('schools:import', 'outreach:read', 'outreach:prepare', 'outreach:send')
+CAPABILITIES = ('schools:import', 'outreach:read', 'outreach:prepare', 'outreach:send',
+                'library:manage', 'commissions:manage', 'team:manage')
 MAX_ACTIVE_KEYS = 10
 RATE_LIMIT_PER_MINUTE = 60
 MAX_BODY_BYTES = 32 * 1024
@@ -121,6 +122,8 @@ def register_agent_api(app, db, User, utc_now):
                 return jsonify(error='Choose valid additional permissions'),400
             if 'outreach:send' in capabilities and data.get('confirm_send') is not True:
                 return jsonify(error='Explicitly delegate execution of human-approved batches'),400
+            if not user.admin and set(capabilities) & {'library:manage','commissions:manage','team:manage'}:
+                return jsonify(error='Only administrators can delegate library, commission or team management'),403
             db.session.query(User.id).filter_by(id=user.id).with_for_update().first()
             active = AgentApiKey.query.filter(AgentApiKey.user_id == user.id, AgentApiKey.revoked_at.is_(None),
                                               AgentApiKey.expires_at > utc_now()).count()
@@ -156,7 +159,7 @@ def register_agent_api(app, db, User, utc_now):
 
     # -- Agent requests ----------------------------------------------------------
 
-    def authenticate(write, required_scope=None):
+    def authenticate(write, required_scope=None, body_limit=MAX_BODY_BYTES):
         """Return (key, user, None) or (None, None, error response)."""
         if not enabled():
             return None, None, (jsonify(error='The PSA agent API is turned off'), 503)
@@ -185,7 +188,7 @@ def register_agent_api(app, db, User, utc_now):
             return key, user, (jsonify(error='This key is read-only'), 403)
         if required_scope and required_scope not in key.scopes.split(','):
             return key,user,(jsonify(error=f'This key requires {required_scope} permission'),403)
-        if request.content_length and request.content_length > MAX_BODY_BYTES:
+        if request.content_length and request.content_length > body_limit:
             return key, user, (jsonify(error='Request too large'), 413)
         return key, user, None
 
@@ -202,7 +205,7 @@ def register_agent_api(app, db, User, utc_now):
             db.session.rollback()
             app.logger.warning('Agent API audit write failed for key %s', key.id)
 
-    def delegate(endpoint, user, *, method='GET', args=None, body=None, view_args=None):
+    def delegate(endpoint, user, *, method='GET', args=None, body=None, view_args=None, files=None):
         """Run a web-app handler as this employee and return (payload, status)."""
         view = app.view_functions.get(endpoint)
         if view is None:
@@ -210,16 +213,16 @@ def register_agent_api(app, db, User, utc_now):
         token = create_access_token(identity=str(user.id), expires_delta=timedelta(seconds=60),
                                     additional_claims={'via': 'agent_api'})
         query = {name: value for name, value in (args or {}).items() if value is not None}
+        content = {'data':files, 'content_type':'multipart/form-data'} if files else {'json':body if method!='GET' else None}
         with app.test_request_context(request.path, method=method, query_string=query,
-                                      json=body if method != 'GET' else None,
-                                      headers={'Authorization': 'Bearer ' + token}):
+                                      **content, headers={'Authorization': 'Bearer ' + token}):
             response = app.make_response(view(**(view_args or {})))
         return response.get_json(silent=True), response.status_code
 
-    def agent_route(rule, methods, name, write=False, required_scope=None):
+    def agent_route(rule, methods, name, write=False, required_scope=None, body_limit=MAX_BODY_BYTES):
         def wrap(handler):
             def endpoint(**kwargs):
-                key, user, error = authenticate((write or request.method != 'GET') if not required_scope else False,required_scope)
+                key, user, error = authenticate((write or request.method != 'GET') if not required_scope else False,required_scope,body_limit)
                 if error:
                     response, status = error
                     if key is not None:
@@ -327,15 +330,21 @@ def register_agent_api(app, db, User, utc_now):
     def agent_commissions(user):
         if not user.admin:
             return {'error': 'Administrator access required'}, 403
-        if 'admin_commissions' not in app.view_functions:
+        if 'list_program_commissions' not in app.view_functions:
             return {'error': 'Commissions are not available yet', 'available': False}, 404
-        payload, status = delegate('admin_commissions', user, args=forwarded(('from', 'to')))
+        payload, status = delegate('list_program_commissions', user, args=forwarded(('season', 'rep_id')))
         if status == 200 and isinstance(payload, dict):
-            # Summary only: per-close detail stays in the web app.
-            payload = {'available': True, 'summary': payload.get('summary'), 'reps': payload.get('reps')}
+            payload = {'available': True, **payload}
         return payload, status
 
     from .agent_workflows import register_agent_workflows
     import sys
     register_agent_workflows(app,db,sys.modules[User.__module__],AgentApiKey,agent_route,delegate)
+    from .campaign_plans import register_campaign_plans
+    from . import outreach
+    register_campaign_plans(app,db,sys.modules[User.__module__],outreach)
+    from .campaign_agent import register_campaign_agent
+    register_campaign_agent(app,db,sys.modules[User.__module__],agent_route,delegate)
+    from .agent_operations import register_agent_operations
+    register_agent_operations(app,agent_route,delegate)
     return AgentApiKey, AgentApiAudit

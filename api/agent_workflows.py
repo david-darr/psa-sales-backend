@@ -64,6 +64,12 @@ def register_agent_workflows(app, db, svc, Key, route, delegate):
     def stripped(payload):
         return {k:v for k,v in payload.items() if k!='preview_token'}
     def reviewed(user,settings):
+        if settings.get('kind')=='reply':
+            payload,status=delegate('reply_preview',user,method='POST',body={k:v for k,v in settings.items() if k!='kind'})
+            if status!=200:return None,(payload,status)
+            original=db.session.get(svc.SentEmail,settings['email_id'])
+            return dict(preview_token=payload['preview_token'],previews=[dict(**{k:v for k,v in payload.items() if k!='preview_token'},
+                school_name=original.school_name,eligible=True,attachments=[],blockers=[])],campaign=dict(name='Conversation reply')),None
         payload,status=delegate('email_preview',user,method='POST',body=settings)
         if status!=200:return None,(payload,status)
         return payload,None
@@ -163,6 +169,20 @@ def register_agent_workflows(app, db, svc, Key, route, delegate):
         draft=Draft.query.filter_by(id=did,user_id=user.id,key_id=g.agent_key.id).first()
         return (public(draft),200) if draft else (dict(error='Draft not found'),404)
 
+    @route('/outreach/reply-drafts',['POST'],'prepare_reply',required_scope='outreach:prepare')
+    def prepare_reply(user):
+        data=request.get_json(silent=True)
+        if not isinstance(data,dict) or set(data)!={'email_id','subject','message'}:
+            return dict(error='Supply only email_id, subject and message'),400
+        if not user.email_password:return dict(error='Connect your mailbox first'),400
+        settings=dict(kind='reply',**data)
+        payload,error=reviewed(user,settings)
+        if error:return error
+        draft=Draft(id=str(uuid.uuid4()),user_id=user.id,key_id=g.agent_key.id,settings=json.dumps(settings),
+            preview=json.dumps(stripped(payload)),review_token=payload['preview_token'],expires_at=svc.utc_now()+timedelta(minutes=15))
+        db.session.add(draft);db.session.flush();record(draft,'prepared');db.session.commit()
+        return public(draft),201
+
     @route('/outreach/drafts/<string:did>/execute',['POST'],'execute',required_scope='outreach:send')
     def execute(user,did):
         if request.get_json(silent=True) not in ({},None):return dict(error='Execute accepts no message, sender or approval arguments'),400
@@ -174,7 +194,10 @@ def register_agent_workflows(app, db, svc, Key, route, delegate):
         if draft.batch_id:return dict(batch_id=draft.batch_id,repeated=True),200
         if draft.status!='approved' or not draft.approval_id or draft.approved_by!=user.id or draft.expires_at<=svc.utc_now():
             return dict(error='A current human approval is required'),409
-        data={**json.loads(draft.settings),'preview_token':draft.review_token}
+        settings=json.loads(draft.settings)
+        if settings.get('kind')=='reply':
+            return delegate('reply_send',user,method='POST',body={**{k:v for k,v in settings.items() if k!='kind'},'preview_token':draft.review_token},view_args={'agent_draft':draft})
+        data={**settings,'preview_token':draft.review_token}
         options,error=out.parse_request_options(data,out.MAX_BATCH_SCHOOLS)
         if error:
             response,status=error;return response.get_json(),status

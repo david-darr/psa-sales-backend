@@ -69,6 +69,7 @@ def register_worker(app, db, svc, out):
         report = dict(scheduled=0, batches=0)
         try:
             recover()
+            report['campaigns'] = svc.schedule_campaigns(max_jobs)
             report['scheduled'] = svc.schedule_sequences(max_jobs)
             for _ in range(max_jobs):
                 # One oldest batch per claim; leases + row locks coordinate workers.
@@ -124,7 +125,7 @@ def main():
     parser.add_argument('--once', action='store_true')
     parser.add_argument('--poll-seconds', type=int, default=10)
     args = parser.parse_args()
-    if not 1 <= args.poll_seconds <= 60: parser.error('poll seconds must be 1–60')
+    if not 1 <= args.poll_seconds <= 60: parser.error('poll seconds must be 1â€“60')
     os.environ['PSA_DISABLE_SCHEDULER'] = 'true'
     from api import api as svc
     worker_id = str(uuid.uuid4())

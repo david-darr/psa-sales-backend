@@ -52,7 +52,7 @@ test('MCP protocol: initialize, list, call, errors',async()=>{
  assert.match(init.result.instructions,/untrusted/);
  const listed=await handleMessage({jsonrpc:'2.0',id:2,method:'tools/list'},request);
  assert.equal(listed.result.tools.length,tools.length);
- assert.ok(tools.filter(t=>!t.annotations.readOnlyHint).every(t=>/write key|Requires (?:schools:import|outreach:prepare|separately delegated outreach:send)/i.test(t.description)));
+ assert.ok(tools.filter(t=>!t.annotations.readOnlyHint).every(t=>/write key|Requires (?:write|schools:import|outreach:prepare|library:manage|commissions:manage|team:manage|separately delegated outreach:send)/i.test(t.description)));
  assert.ok(!tools.some(t=>/send/.test(t.name)));
  const called=await handleMessage({jsonrpc:'2.0',id:3,method:'tools/call',params:{name:'psa_connection',arguments:{}}},request);
  assert.deepEqual(JSON.parse(called.result.content[0].text),{id:1});
@@ -77,4 +77,49 @@ test('approval tools never expose human approval or message overrides on executi
  await assert.rejects(callTool(request,'psa_execute_approved_outreach',{draft_id:'safe',sender_id:2}),/Invalid tool arguments/);
  await assert.rejects(callTool(request,'psa_approve_outreach',{draft_id:'safe'}),/Unknown tool/);
  await assert.rejects(request('POST','/outreach/drafts/safe/approve',{}),/Invalid API path/);
+});
+
+
+test('campaign tools prepare/read/stop fixed scope but cannot approve or resume',async()=>{
+ const {calls,request}=fake();
+ await callTool(request,'psa_prepare_campaign',{name:'Winter',school_ids:[1,2],template_id:3,template_revision:1,daily_cap:10,start_date:'2026-11-09',end_date:'2026-12-20'});
+ await callTool(request,'psa_campaign_plan',{plan_id:'test-plan'});
+ await callTool(request,'psa_stop_campaign',{plan_id:'test-plan',revision:2,action:'pause'});
+ assert.equal(calls[0].url,'https://psa.example.test/api/agent/v1/outreach/campaign-plans');
+ assert.equal(calls[1].url,'https://psa.example.test/api/agent/v1/outreach/campaign-plans/test-plan');
+ assert.deepEqual(JSON.parse(calls[2].init.body),{revision:2,action:'pause'});
+ await assert.rejects(callTool(request,'psa_campaign_plan',{plan_id:'../admin'}),/Invalid record ID/);
+ await assert.rejects(request('POST','/outreach/campaign-plans/test-plan/approve',{}),/Invalid API path/);
+ await assert.rejects(request('POST','/outreach/campaign-plans/test-plan/resume',{}),/Invalid API path/);
+ assert.ok(!tools.some(t=>t.name==='psa_approve_campaign'));
+});
+
+test('business operations preserve IDs in bounded bodies and reject unknown fields',async()=>{
+ const {calls,request}=fake();
+ await callTool(request,'psa_edit_contact',{school_id:8,link_id:9,version:1,contact_version:2,name:'Taylor'});
+ await callTool(request,'psa_find_schools',{address:'12345',radius_km:12.5});
+ await callTool(request,'psa_capabilities',{});
+ assert.equal(calls[0].url,'https://psa.example.test/api/agent/v1/operations/psa_edit_contact');
+ assert.deepEqual(JSON.parse(calls[0].init.body),{school_id:8,link_id:9,version:1,contact_version:2,name:'Taylor'});
+ assert.equal(calls[1].url,'https://psa.example.test/api/agent/v1/operations/psa_find_schools');
+ assert.equal(calls[2].init.method,'GET');
+ await assert.rejects(callTool(request,'psa_edit_contact',{school_id:-1,link_id:9,version:1,contact_version:2}),/Invalid/);
+ await assert.rejects(callTool(request,'psa_find_schools',{address:'12345',radius_km:NaN}),/Invalid/);
+ await assert.rejects(callTool(request,'psa_create_template',{name:'Test',kind:'initial',audience:'general',subject:'Test',body:'Body',access_token:'secret'}),/Invalid/);
+ await assert.rejects(request('POST','/operations/arbitrary',{}),/Invalid API path/);
+ await assert.rejects(request('GET','/operations/psa_upload_pdf',{}),/Invalid API path/);
+ assert.equal(calls.length,3);
+});
+
+test('uploads exceed the old 64KB limit and replies stay preparation-only',async()=>{
+ const {calls,request}=fake();
+ const encoded=Buffer.from('%PDF-1.4\n'+'0'.repeat(70000)).toString('base64');
+ await callTool(request,'psa_upload_pdf',{filename:'Chosen flyer.pdf',encoded});
+ assert.equal(calls[0].url,'https://psa.example.test/api/agent/v1/operations/psa_upload_pdf');
+ assert.equal(JSON.parse(calls[0].init.body).encoded,encoded);
+ await callTool(request,'psa_prepare_reply',{email_id:12,subject:'Re: Hello',message:'Thanks'});
+ assert.equal(calls[1].url,'https://psa.example.test/api/agent/v1/outreach/reply-drafts');
+ assert.deepEqual(JSON.parse(calls[1].init.body),{email_id:12,subject:'Re: Hello',message:'Thanks'});
+ assert.equal(tools.find(t=>t.name==='psa_delete_schools').annotations.destructiveHint,true);
+ assert.equal(tools.find(t=>t.name==='psa_find_schools').annotations.readOnlyHint,true);
 });

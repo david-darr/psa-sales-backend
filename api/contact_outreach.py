@@ -61,7 +61,7 @@ def register_contact_outreach(app, db, svc, out):
             raise ValueError('Campaign unavailable')
         return dict(id=row.id, name=row.name, daily_limit=row.daily_limit)
 
-    def resolve(user, options, data):
+    def resolve(user, options, data, max_contacts=100):
         selected = out.owned_rows(user, options['ids'])
         if selected is None:
             raise PermissionError('Send only to schools assigned to you')
@@ -72,7 +72,7 @@ def register_contact_outreach(app, db, svc, out):
         if template and template['audience'] not in ('general', audience):
             raise ValueError('Choose the audience matching this template')
         choices = data.get('contact_contexts', {})
-        if not isinstance(choices, dict) or len(choices) > 100:
+        if not isinstance(choices, dict) or len(choices) > max_contacts:
             raise ValueError('Choose a school context for shared contacts')
         cam = campaign(data.get('campaign_id', 'standard'))
         schools = {row[0].id: row[0] for row in selected}
@@ -85,8 +85,8 @@ def register_contact_outreach(app, db, svc, out):
                 audience == 'trunk_or_treat' and 'trunk_or_treat' in json.loads(link.tags_json))
             if matches:
                 grouped.setdefault(contact.id, []).append((link, contact))
-        if len(grouped) > 100:
-            raise ValueError('Review at most 100 contact mailboxes per batch. Select fewer schools.')
+        if len(grouped) > max_contacts:
+            raise ValueError(f'Review at most {max_contacts} contact mailboxes. Select fewer schools.')
         addresses = [links[0][1].email for links in grouped.values()]
         originals = svc.SentEmail.query.filter(func.lower(func.trim(svc.SentEmail.school_email)).in_(addresses)).order_by(
             svc.SentEmail.sent_at.desc(), svc.SentEmail.id.desc()).all()
@@ -247,6 +247,7 @@ def register_contact_outreach(app, db, svc, out):
         return dict(batch_id=batch.id, status='queued', total=len(eligible), skipped=[]), 202, batch
 
     svc.preview_contact_outreach, svc.queue_contact_outreach = preview, queue
+    svc.resolve_campaign_contacts = resolve
 
     def school_picker(user):
         try: page, per_page = svc.contact_outreach_paging()
@@ -360,7 +361,7 @@ def register_contact_outreach(app, db, svc, out):
 
     @app.post('/api/outreach/reply-send')
     @jwt_required()
-    def reply_send():
+    def reply_send(agent_draft=None):
         user, data = out.current_user(), request.get_json(silent=True) or {}
         if user is None: return jsonify(error='User not found'), 404
         if not isinstance(data, dict) or not isinstance(data.get('preview_token'), str):
@@ -390,6 +391,9 @@ def register_contact_outreach(app, db, svc, out):
             contact_id=contact.id, contact_link_id=link.id, contact_version=contact.version, link_version=link.version,
             ownership_version=school.ownership_version, followup_of_email_id=original.id, status='queued'))
         review.batch_id = batch.id
+        if agent_draft is not None:
+            agent_draft.batch_id=batch.id;agent_draft.status='queued';agent_draft.executed_at=svc.utc_now()
+            svc.record_agent_outreach_event(agent_draft,'queued')
         db.session.commit()
         out.start_worker(current_app._get_current_object(), batch.id, batch.worker_token)
         return jsonify(batch_id=batch.id, status='queued'), 202

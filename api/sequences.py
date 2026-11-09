@@ -161,6 +161,9 @@ def register_sequences(app, db, svc, out):
 
     def guard(enrollment, step=None, check_window=True):
         moment = out.now()
+        if hasattr(svc,'campaign_enrollment_block'):
+            blocked=svc.campaign_enrollment_block(enrollment.id)
+            if blocked:return blocked
         if enrollment.status != 'active': return enrollment.reason or 'Sequence paused or cancelled'
         sequence = db.session.get(Sequence, enrollment.sequence_id)
         if not sequence or sequence.archived or sequence.revision != enrollment.revision: return 'Sequence settings changed; prepare a new approval'
@@ -469,6 +472,7 @@ def register_sequences(app, db, svc, out):
         # Reconcile durable recipient outcomes before advancing any sequence.
         for step in Step.query.filter_by(status='queued').order_by(Step.id).limit(100).all():
             enrollment=db.session.get(Enrollment,step.enrollment_id)
+            if hasattr(svc,'campaign_enrollment_block') and svc.campaign_enrollment_block(enrollment.id):continue
             reason=guard(enrollment)
             if reason:stop(enrollment,reason)
             else:result(step.recipient_id)
@@ -484,6 +488,7 @@ def register_sequences(app, db, svc, out):
         for (sid,) in candidates:
             if queued >= limit: break
             step = db.session.get(Step, sid); enrollment = db.session.get(Enrollment, step.enrollment_id)
+            if hasattr(svc,'campaign_enrollment_block') and svc.campaign_enrollment_block(enrollment.id):continue
             reason = guard(enrollment)
             if reason:
                 stop(enrollment, reason); db.session.commit(); continue

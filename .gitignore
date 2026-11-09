@@ -9,3 +9,6 @@ node_modules/
 
 # Reviewed campaign copy, not credentials.
 !api/seed_data/winter_2027_templates.json
+
+# Generated public tool schemas, never credentials or application data.
+!integrations/agent-operations.json

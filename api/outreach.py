@@ -410,7 +410,7 @@ def fingerprint(email_address, content):
     return hashlib.sha256((original + json.dumps(metadata, sort_keys=True)).encode()).hexdigest()
 
 
-def parse_request_options(data, max_schools):
+def parse_request_options(data, max_schools, preview_limit=MAX_PREVIEW_SCHOOLS):
     """Validate the fields shared by preview and batch creation. Returns (options, error_response)."""
     if not isinstance(data, dict):
         return None, (jsonify(error='Supply an outreach request object'), 400)
@@ -440,8 +440,8 @@ def parse_request_options(data, max_schools):
             raise ValueError('Select catalog PDFs instead of the all-flyers checkbox.')
     except ValueError as exc:
         return None, (jsonify(error=str(exc)), 400)
-    if (template or catalog_files) and len(ids) > MAX_PREVIEW_SCHOOLS:
-        return None, (jsonify(error='Shared-template batches require review of every recipient. Select at most 100 schools.'), 400)
+    if (template or catalog_files) and len(ids) > preview_limit:
+        return None, (jsonify(error=f'Shared-template batches require review of every recipient. Select at most {preview_limit} schools.'), 400)
     unique = list(dict.fromkeys(ids))
     return {'ids': unique, 'kind': kind, 'subject': subject, 'body': body, 'attachments': attachments, 'template': template, 'catalog_files': catalog_files}, None
 
@@ -622,6 +622,7 @@ def _process_batch(batch_id, token, delay, max_recipients=None):
                 OutreachBatch.id == batch_id)).one_or_none()
             if live is None or live.worker_token != token or live.status != 'sending':
                 break  # cancelled, retried by a newer worker, or deleted
+            if hasattr(svc,'campaign_dispatch_gate') and svc.campaign_dispatch_gate(batch_id):break
             if max_recipients is not None and processed >= max_recipients:
                 if not OutreachRecipient.query.filter_by(batch_id=batch_id, status='queued').first(): break
                 db.session.execute(update(OutreachBatch).where(OutreachBatch.id==batch_id,
@@ -724,6 +725,9 @@ def skip_reason(batch, recipient, school):
     """Re-check the rules right before sending; the world may have changed since queueing."""
     if hasattr(svc,'agent_batch_guard'):
         reason=svc.agent_batch_guard(batch.id)
+        if reason:return reason
+    if hasattr(svc,'campaign_recipient_guard'):
+        reason=svc.campaign_recipient_guard(recipient)
         if reason:return reason
     if batch.kind == 'test':
         user = db.session.get(svc.User, batch.user_id)

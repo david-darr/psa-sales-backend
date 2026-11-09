@@ -1,5 +1,6 @@
 """Native Kairos broker + real PSA handlers, fake UI storage and SMTP only."""
 import importlib
+import json
 import sys
 import types
 import base64
@@ -32,6 +33,25 @@ class Storage:
     def decrypt(self,value):return base64.b64decode(value.removeprefix('test-encrypted:')).decode()
 
 class KairosNativeTests(OutreachBase):
+    def test_business_catalog_upload_and_permissions_from_fresh_chats(self):
+        self.owner.admin=True;svc.db.session.commit()
+        self.connect(capabilities=['outreach:read','library:manage'])
+        # Two independently built connection maps represent fresh chat sessions.
+        first=self.agent();second=self.agent()
+        self.assertEqual(catalog.call_tool('psa_connection',{},first)['id'],self.owner.id)
+        self.assertEqual(catalog.call_tool('psa_connection',{},second)['id'],self.owner.id)
+        report=catalog.call_tool('psa_capabilities',{},second)
+        self.assertTrue(all(row['available'] for row in report['operations']))
+        data=dict(filename='Chat catalog.pdf',encoded=base64.b64encode(b'%PDF-1.4\n'+b'0'*70000+b'\n%%EOF').decode())
+        count=len(self.calls)
+        preview=catalog.call_tool('psa_upload_pdf',data,first)
+        self.assertTrue(preview['confirmation_required'])
+        self.assertNotIn(data['encoded'],json.dumps(preview))
+        self.assertEqual(len(self.calls),count)
+        saved=catalog.call_tool('psa_upload_pdf',{**data,'confirm':True},second)
+        self.assertEqual(saved['bytes'],70015)
+        with self.assertRaises(ValueError):catalog.call_tool('psa_approve_campaign',{},first)
+        with self.assertRaises(catalog.ApiError):catalog.call_tool('psa_create_commission',dict(sales_school_id=1,season='Winter',program='A',rep_id=self.owner.id,sale_type='new',gross='10',leagueapps=False,cash_expenses='0',confirm=True),first)
     def setUp(self):
         super().setUp()
         self.owner.set_password('Only-a-local-fixture');svc.db.session.commit()
@@ -182,4 +202,22 @@ class KairosNativeTests(OutreachBase):
         self.assertEqual(self.native.request('chris','GET','/api/outreach/sequence-enrollments')['items'][0]['id'],eid)
         self.native.request('chris','POST',f'/api/outreach/sequence-enrollments/{eid}/cancel',{})
         self.assertNotEqual(svc.db.session.get(svc.SequenceEnrollment,eid).status,'active')
+        self.assertEqual(self.fake.sent,[])
+
+    def test_campaign_review_approval_and_stop_require_no_website(self):
+        self.owner.admin=True;svc.db.session.commit();self.connect()
+        template=self.native.request('chris','POST','/api/outreach/templates',dict(name='Native campaign intro',kind='initial',step=0,audience='general',subject='Hi {school name}',body='Hello {contact name}'))
+        school=self.school('Native Campaign School')
+        from datetime import timedelta
+        from zoneinfo import ZoneInfo
+        today=datetime.now(ZoneInfo('America/New_York')).date()
+        draft=catalog.call_tool('psa_prepare_campaign',dict(name='Native bounded campaign',school_ids=[school.id],template_id=template['id'],template_revision=1,daily_cap=10,start_date=today.isoformat(),end_date=(today+timedelta(days=40)).isoformat(),confirm=True),self.agent())
+        preview=self.native.request('chris','GET','/api/outreach/campaign-plans/'+draft['id'])
+        self.assertEqual(preview['preview']['rows'][0]['email'],school.email)
+        approved=self.native.request('chris','POST','/api/outreach/campaign-plans/'+draft['id']+'/approve',dict(revision=draft['revision'],confirm='AUTHORIZE_CAMPAIGN'))
+        self.assertEqual(approved['status'],'scheduled')
+        summary=self.native.request('chris','GET','/api/outreach/campaign-plans/'+draft['id']+'/summary')
+        self.assertEqual(summary['smtp_accepted'],0)
+        stopped=catalog.call_tool('psa_stop_campaign',dict(plan_id=draft['id'],revision=approved['revision'],action='cancel',confirm=True),self.agent())
+        self.assertEqual(stopped['status'],'cancelled')
         self.assertEqual(self.fake.sent,[])
