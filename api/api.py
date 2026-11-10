@@ -1,7 +1,5 @@
-# ====================================================
-# IMPORTS & EXTERNAL LIBRARIES
-# ====================================================
-
+# =============================================# IMPORTS & EXTERNAL LIBRARIES
+# =============================================
 import os
 import requests
 import re
@@ -58,10 +56,8 @@ from werkzeug.security import generate_password_hash, check_password_hash
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.executors.pool import ThreadPoolExecutor
 
-# ====================================================
-# ENVIRONMENT & CONFIGURATION
-# ====================================================
-
+# =============================================# ENVIRONMENT & CONFIGURATION
+# =============================================
 load_dotenv()
 from .mail_credentials import (  # noqa: E402 - dotenv must load before key validation
     MailCredentialUnavailable,
@@ -72,10 +68,8 @@ from .mail_credentials import (  # noqa: E402 - dotenv must load before key vali
 )
 GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
 
-# ====================================================
-# FLASK APP INITIALIZATION
-# ====================================================
-
+# =============================================# FLASK APP INITIALIZATION
+# =============================================
 app = Flask(__name__)
 
 # CORS Configuration
@@ -128,10 +122,8 @@ app.config['MAIL_PASSWORD'] = os.getenv("MAIL_PASSWORD")
 app.config['MAIL_DEFAULT_SENDER'] = os.getenv("MAIL_USERNAME")
 mail = Mail(app)
 
-# ====================================================
-# DATABASE MODELS
-# ====================================================
-
+# =============================================# DATABASE MODELS
+# =============================================
 class User(db.Model):
     __tablename__ = 'users'
     id = db.Column(db.Integer, primary_key=True)
@@ -366,10 +358,8 @@ class SchoolActivity(db.Model):
     created_at = db.Column(db.DateTime, nullable=False, default=lambda: utc_now())
     school = db.relationship('SalesSchool', backref=db.backref('activities', lazy=True, cascade='all, delete-orphan'))
 
-# ====================================================
-# GOOGLE SHEETS DATA MANAGEMENT
-# ====================================================
-
+# =============================================# GOOGLE SHEETS DATA MANAGEMENT
+# =============================================
 def load_PSA_school_sheet():
     """Load the new Google Sheet for PSA Preschools and Happy Feet."""
     scope = ['https://spreadsheets.google.com/feeds', 'https://www.googleapis.com/auth/drive']
@@ -454,10 +444,8 @@ REC_SITES = [
     {"name": "Heron Overlook", "address": "20550 Heron overlook Plz, Ashburn, VA 20147"}
 ]
 
-# ====================================================
-# UTILITY FUNCTIONS
-# ====================================================
-
+# =============================================# UTILITY FUNCTIONS
+# =============================================
 def normalize_name(name):
     """Lowercase, remove non-alphanumeric, and extra spaces for fuzzy matching."""
     if not name:
@@ -542,10 +530,8 @@ def extract_email_from_string(email_string):
     print(f"DEBUG: No email pattern found, returning: {result}")
     return result
 
-# ====================================================
-# EMAIL REPLY CHECKING SYSTEM
-# ====================================================
-
+# =============================================# EMAIL REPLY CHECKING SYSTEM
+# =============================================
 MAIL_SYNC_BATCH_LIMIT = 500  # headers scanned per check; full messages are fetched only for replies
 MAIL_HEADER_FIELDS = 'FROM DATE SUBJECT MESSAGE-ID IN-REPLY-TO REFERENCES AUTO-SUBMITTED PRECEDENCE LIST-ID CONTENT-TYPE'
 MAIL_SYNC_LOOKBACK_DAYS = 90
@@ -820,10 +806,8 @@ def check_email_replies():
                 logging.exception('Background mailbox sync failed for user %s', user.id)
 
 
-# ====================================================
-# SCHEDULER CONFIGURATION
-# ====================================================
-
+# =============================================# SCHEDULER CONFIGURATION
+# =============================================
 # Configure logging for scheduler
 logging.basicConfig(level=logging.INFO)
 scheduler_logger = logging.getLogger('apscheduler')
@@ -899,10 +883,8 @@ if scheduler_disabled:
 else:
     print(f"Scheduler initialization: {'✅ Success' if scheduler_started else '❌ Failed'}")
 
-# ====================================================
-# EMAIL TEMPLATES
-# ====================================================
-
+# =============================================# EMAIL TEMPLATES
+# =============================================
 # Template for Preschools
 PRESCHOOL_EMAIL_TEMPLATE = """
 Hello {{ contact_name }},
@@ -1070,10 +1052,8 @@ Sales Associate and Coach
 www.thepsasports.com
 """
 
-# ====================================================
-# API ENDPOINTS - USER AUTHENTICATION
-# ====================================================
-
+# =============================================# API ENDPOINTS - USER AUTHENTICATION
+# =============================================
 @app.route("/api/register", methods=["POST"])
 def register():
     data = request.get_json(silent=True)
@@ -1234,10 +1214,8 @@ def profile():
         "mail_connected": bool(user.email_password)
     })
 
-# ====================================================
-# API ENDPOINTS - EMAIL SETTINGS
-# ====================================================
-
+# =============================================# API ENDPOINTS - EMAIL SETTINGS
+# =============================================
 @app.route("/api/email-settings", methods=["POST"])
 @jwt_required()
 def save_email_settings():
@@ -1343,10 +1321,8 @@ def manual_check_email_replies():
     except RuntimeError as exc:
         return jsonify({"error": str(exc)}), 502
 
-# ====================================================
-# API ENDPOINTS - SCHOOL MANAGEMENT
-# ====================================================
-
+# =============================================# API ENDPOINTS - SCHOOL MANAGEMENT
+# =============================================
 from .portfolio import iso_utc, set_school_status, FINISHED_STAGES  # noqa: E402
 from .finder import load_saved_index  # noqa: E402
 
@@ -1940,10 +1916,8 @@ def upload_schools_csv():
         print(f"DEBUG: CSV upload error: {str(e)}")
         return jsonify({"error": f"Failed to process CSV: {str(e)}"}), 500
 
-# ====================================================
-# API ENDPOINTS - EMAIL OPERATIONS
-# ====================================================
-
+# =============================================# API ENDPOINTS - EMAIL OPERATIONS
+# =============================================
 def render_email_text(template, **values):
     # These are trusted application templates producing plain text. The MIME
     # builder escapes the HTML alternative separately, exactly once.
@@ -2557,17 +2531,13 @@ def get_email_reply_chain(email_id):
         ]
     })
 
-# ====================================================
-# API ENDPOINTS - SCHOOL FINDER
-# ====================================================
-
+# =============================================# API ENDPOINTS - SCHOOL FINDER
+# =============================================
 # The finder (/api/find-schools, /details, /save-batch) lives in finder.py and is
 # registered with the other route modules at the bottom of this file.
 
-# ====================================================
-# API ENDPOINTS - ROUTE PLANNING
-# ====================================================
-
+# =============================================# API ENDPOINTS - ROUTE PLANNING
+# =============================================
 @app.route("/api/route-plan", methods=["POST"])
 @jwt_required()
 def route_plan():
@@ -2597,10 +2567,8 @@ def route_plan():
     route, distance = order_visits(schools, (lat, lng), haversine)
     return jsonify(route=route, method='geographic_distance', distance_km=round(distance, 2))
 
-# ====================================================
-# API ENDPOINTS - MAP VISUALIZATION
-# ====================================================
-
+# =============================================# API ENDPOINTS - MAP VISUALIZATION
+# =============================================
 @app.route("/api/map-schools", methods=["GET"])
 @jwt_required()
 def map_schools():
@@ -2760,17 +2728,13 @@ def get_all_emails():
         traceback.print_exc()
         return jsonify({'error': str(e)}), 500
 
-# ====================================================
-# API ENDPOINTS - CUSTOM REPLIES
-# ====================================================
+# =============================================# API ENDPOINTS - CUSTOM REPLIES
+# =============================================
 
 
 
-
-# ====================================================
-# APPLICATION STARTUP
-# ====================================================
-
+# =============================================# APPLICATION STARTUP
+# =============================================
 from .crm import register_crm_routes
 register_crm_routes(app, db, User, SalesSchool, SentEmail, SalesTask, SchoolActivity, school_dict, School)
 
@@ -2844,6 +2808,8 @@ register_web_worker(app, db, _sys.modules[__name__])
 
 from .gmail_oauth import register_gmail_oauth  # noqa: E402
 register_gmail_oauth(app, db, _sys.modules[__name__])
+from .mail_connectivity import register_mail_connectivity
+register_mail_connectivity(app)
 
 if __name__ == "__main__":
     with app.app_context():
