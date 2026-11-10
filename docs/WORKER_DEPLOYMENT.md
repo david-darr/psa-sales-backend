@@ -1,5 +1,7 @@
 # PSA sending worker hosting
 
+> Superseded for tonight by [RELEASE_20261110.md](RELEASE_20261110.md): the deployed process was measured to reach SMTP/IMAP successfully. Reuse existing compute and credentials; OAuth remains disabled. Earlier hosting assumptions below are historical, not the active cutover plan.
+
 > Current hosting decision: the existing backend is Render Free, no paid worker is authorized, and no always-on machine is available. Cutover is blocked until a cloud-compatible transport and scheduler are ready. See [FREE_CLOUD_MAIL_PLAN.md](FREE_CLOUD_MAIL_PLAN.md). Web mode does not bypass the SMTP restriction.
 
 No additional paid service is authorized or required by the application. Hosting must still support outbound Gmail SMTP and the desired scheduling availability.

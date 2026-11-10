@@ -52,7 +52,7 @@ def register_mail_connectivity(app):
     def mail_connectivity():
         nonlocal cached, expires
         if cached is not None and time.monotonic() < expires:
-            return jsonify(cached)
+            return jsonify(**cached, queue_worker_mode=app.config.get('OUTREACH_WORKER_MODE','legacy'))
         if not lock.acquire(blocking=False):
             return jsonify(status='checking'), 202
         try:
@@ -61,6 +61,6 @@ def register_mail_connectivity(app):
                     checked_at=datetime.now(timezone.utc).isoformat(),
                     note='Connectivity only; no mailbox login or email send was attempted.')
                 expires = time.monotonic() + 900
-            return jsonify(cached)
+            return jsonify(**cached, queue_worker_mode=app.config.get('OUTREACH_WORKER_MODE','legacy'))
         finally:
             lock.release()

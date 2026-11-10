@@ -18,6 +18,8 @@ class WebWorkerTests(unittest.TestCase):
 
     def test_default_external_and_invalid_modes(self):
         with patch.dict(os.environ,{},clear=True):self.assertEqual(worker_mode(),'external')
+        with patch.dict(os.environ,{'RENDER':'true'},clear=True):self.assertEqual(worker_mode(),'web')
+        with patch.dict(os.environ,{'RENDER':'true','OUTREACH_WORKER_MODE':'external'},clear=True):self.assertEqual(worker_mode(),'external')
         with patch.dict(os.environ,{'OUTREACH_WORKER_MODE':'typo'}):
             with self.assertRaises(ValueError):worker_mode()
 

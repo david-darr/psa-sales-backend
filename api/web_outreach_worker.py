@@ -11,7 +11,9 @@ import uuid
 
 
 def worker_mode():
-    mode=os.getenv('OUTREACH_WORKER_MODE','external').strip().lower()
+    # Reuse the existing Render web service; dedicated CLI explicitly selects external.
+    default='web' if os.getenv('RENDER','').lower()=='true' else 'external'
+    mode=os.getenv('OUTREACH_WORKER_MODE',default).strip().lower()
     if mode not in ('external','web'):
         raise ValueError('OUTREACH_WORKER_MODE must be external or web')
     return mode
@@ -48,6 +50,8 @@ class WebOutreachWorker:
                         try:
                             # Same fenced durable worker, one bounded batch turn.
                             self.svc.run_outreach_cycle(self.worker_id,max_jobs=1)
+                            if hasattr(self.svc,'run_reply_sync_turn'):
+                                self.svc.run_reply_sync_turn()
                         finally:
                             self.db.session.remove()
                 except Exception:
@@ -82,6 +86,9 @@ def register_web_worker(app,db,svc):
     except ValueError:raise ValueError('OUTREACH_POLL_SECONDS must be a whole number') from None
     worker=WebOutreachWorker(app,db,svc,poll_seconds)
     app.extensions['psa_web_outreach_worker']=worker
+    if hasattr(svc,'User'):
+        from .mail_jobs import sync_mailboxes
+        svc.run_reply_sync_turn=lambda: sync_mailboxes(svc,budget_seconds=25,max_batches=1,stale_only=True)
 
     @app.before_request
     def ensure_outreach_worker():

@@ -2808,6 +2808,8 @@ register_web_worker(app, db, _sys.modules[__name__])
 
 from .gmail_oauth import register_gmail_oauth  # noqa: E402
 register_gmail_oauth(app, db, _sys.modules[__name__])
+from .outreach_clock import register_outreach_clock  # noqa: E402
+register_outreach_clock(app, db, _sys.modules[__name__])
 from .mail_connectivity import register_mail_connectivity
 register_mail_connectivity(app)
 

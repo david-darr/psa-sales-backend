@@ -1,5 +1,7 @@
 # Cloud-only mail on the existing Free backend
 
+> Superseded for tonight by [RELEASE_20261110.md](RELEASE_20261110.md): the deployed process was measured to reach SMTP/IMAP successfully. Reuse existing compute and credentials; OAuth remains disabled. Earlier hosting assumptions below are historical, not the active cutover plan.
+
 ## Confirmed constraints (2026-11-09)
 
 The owner confirmed Render Free, declined an additional paid worker and has no always-on machine available. Keep the existing website deployment unchanged during this work. The preceding environment-only deployment disabled the old automatic sender; it did not release this draft queue code.
