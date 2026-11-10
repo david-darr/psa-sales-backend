@@ -30,12 +30,16 @@ def register_worker(app, db, svc, out):
     @jwt_required()
     def worker_status():
         if not out.current_user(): return jsonify(error='User not found'), 404
+        mode=app.config.get('OUTREACH_WORKER_MODE','external')
         latest = Heartbeat.query.order_by(Heartbeat.last_seen_at.desc()).first()
         return jsonify(online=bool(latest and not latest.last_error and latest.status != 'stopped' and latest.last_seen_at >= out.now()-timedelta(minutes=5)),
             has_error=bool(latest and latest.last_error),
             last_seen_at=out.iso(latest.last_seen_at) if latest else None,
             status=latest.status if latest else 'not_started',
-            message='Queued mail waits for the separate worker. This page does not send it in a web thread.')
+            mode=mode,
+            scheduling_note='If the web host sleeps, scheduled mail waits until it wakes.' if mode=='web' else None,
+            message='Sending shares the existing backend; saved jobs survive a restart.' if mode=='web' else
+                'Queued mail waits for the configured sending worker.')
 
     def recover():
         # A checker has not begun SMTP. Its fenced lease is safe to reclaim.
@@ -127,6 +131,7 @@ def main():
     args = parser.parse_args()
     if not 1 <= args.poll_seconds <= 60: parser.error('poll seconds must be 1â€“60')
     os.environ['PSA_DISABLE_SCHEDULER'] = 'true'
+    os.environ['OUTREACH_WORKER_MODE'] = 'external'
     from api import api as svc
     worker_id = str(uuid.uuid4())
     try:

@@ -1,24 +1,23 @@
-# Proposed PSA sending worker
+# PSA sending worker hosting
 
-This is a reviewable hosting proposal, not a provisioned service. Do not merge an API-only release and expect queued mail to send.
+> Current hosting decision: the existing backend is Render Free, no paid worker is authorized, and no always-on machine is available. Cutover is blocked until a cloud-compatible transport and scheduler are ready. See [FREE_CLOUD_MAIL_PLAN.md](FREE_CLOUD_MAIL_PLAN.md). Web mode does not bypass the SMTP restriction.
 
-## Render proposal
+No additional paid service is authorized or required by the application. Hosting must still support outbound Gmail SMTP and the desired scheduling availability.
 
-- Service name: `psa-sales-outreach-worker`.
-- Service type: Background Worker, in the same workspace/region as the existing backend.
-- Repository: `david-darr/psa-sales-backend`; production branch `main`, deployed at the same release revision as the API.
-- Build: `pip install -r api/requirements.txt`.
-- Start: `python -m api.outreach_worker --poll-seconds 10`.
-- Initial size: smallest paid 512 MB instance, subject to confirming availability in the actual workspace. Render's public compute pricing on 2026-11-09 lists this size at $7/month; existing workspace fees, other services and usage are separate. No plan has been selected or purchased.
+## Reuse the existing backend
 
-Reuse the backend's private environment in Render or a private environment group; do not paste credentials in chat or commit an environment file. At minimum the worker needs the same DATABASE_URL, MAIL_CREDENTIAL_KEY, JWT_SECRET_KEY and relevant Google/location integration configuration as the compatible API. Keep MAIL_CREDENTIAL_ALLOW_LEGACY=false and CAMPAIGN_AUTOMATION_ENABLED=false during acceptance. Disable AUTO_FOLLOWUPS_ENABLED on the old web deployment before cutover. The worker disables its own embedded scheduler automatically.
+The compatible backend can run the same durable queue with `OUTREACH_WORKER_MODE=web` and `OUTREACH_POLL_SECONDS=10`. Default mode is `external`, preserving the existing dedicated-worker deployment option. Configure web mode only with the compatible release, after its migrations and queue inspection.
 
-One worker is sufficient for initial controlled acceptance; it takes bounded fair turns across batches. Monitor heartbeat, memory, queue age and sending errors before increasing team load. Scale based on actual hosted measurements rather than local throughput claims. No worker should be started against unreviewed legacy queued work.
+The first request starts one background thread per web process, without doing SMTP in the request. Database leases coordinate concurrent workers. Saved approvals, caps, cancellation, recipient reservations and uncertain-send handling remain enforced. Each turn processes one bounded batch job. Restarting resumes eligible saved work; it does not blindly resend uncertain mail. Monitor memory, heartbeat and API latency on the actual host.
 
-## Alternative host
+This reuses existing compute, rather than provisioning another service. It does not keep a sleeping host awake. Scheduled messages wait while the host is asleep or unavailable. Render Free sleeps after 15 minutes without inbound traffic and blocks outbound SMTP ports 25, 465 and 587; web mode cannot bypass those limits. Confirm the existing service plan before enabling production sending. If the backend is already paid, this mode adds no separate worker service. If it is Free, pause cutover until an authorized SMTP-capable existing host or a reviewed HTTPS mail transport is available. Do not promise free always-on automation.
 
-An existing always-on managed host can run the same command if it has private configuration, outbound Gmail SMTP/IMAP access, reliable process restart and logs, and network access to the production database. A laptop that may sleep is unsuitable as the production team worker. A cron-only job needs separate schedule/recovery design and should not be substituted silently.
+Reference: https://render.com/docs/free
+
+## Existing external host option
+
+An already available always-on host can run `python -m api.outreach_worker --poll-seconds 10` at the compatible API revision, with `OUTREACH_WORKER_MODE=external`. It needs private database/mail configuration, outbound SMTP/IMAP, process restart and logs. No new paid host is provisioned by this proposal.
 
 ## Acceptance and activation
 
-Confirm the hosted worker heartbeat first. Authorize a single internal-recipient test separately, verify PDF receipt and reply threading/sync, then test cancellation and hosted recovery without resending uncertain messages. Keep campaign automation off until the employee's bounded campaign can be reviewed and explicitly authorized. A worker can send already-approved manual mail even when campaign automation is false; the queue must be inspected before startup.
+Keep `AUTO_FOLLOWUPS_ENABLED=false`, `MAIL_CREDENTIAL_ALLOW_LEGACY=false` and `CAMPAIGN_AUTOMATION_ENABLED=false`. Keep the existing persistent `MAIL_CREDENTIAL_KEY` unchanged. Inspect pending work before starting either worker mode. Confirm heartbeat and permissions, then perform a separately authorized single internal-recipient test, PDF receipt, reply sync, cancellation and restart recovery. Campaign automation stays off until explicitly approved. Both modes can send already-approved manual mail even with campaign automation off.

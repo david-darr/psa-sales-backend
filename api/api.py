@@ -2839,6 +2839,12 @@ SupportReport = register_support_routes(app, db, _sys.modules[__name__])
 from .agent_api import register_agent_api  # noqa: E402
 AgentApiKey, AgentApiAudit = register_agent_api(app, db, User, utc_now)
 
+from .web_outreach_worker import register_web_worker  # noqa: E402
+register_web_worker(app, db, _sys.modules[__name__])
+
+from .gmail_oauth import register_gmail_oauth  # noqa: E402
+register_gmail_oauth(app, db, _sys.modules[__name__])
+
 if __name__ == "__main__":
     with app.app_context():
         db.create_all()
