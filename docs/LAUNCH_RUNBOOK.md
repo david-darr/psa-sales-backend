@@ -1,3 +1,5 @@
+> HISTORICAL LAUNCH RUNBOOK. Do not run its reset or old commission steps for the current release. Use [RELEASE_20261109.md](RELEASE_20261109.md).
+
 # PSA Sales launch runbook (2026-10-29)
 
 Every step that touches production needs David's go-ahead. Nothing here has been pushed, deployed or run against production.

@@ -88,41 +88,17 @@ class FollowupTests(unittest.TestCase):
         self.records.append(record)
         return record
 
-    def test_preview_matches_message_sent_and_secondary_contact_template(self):
+    def test_secondary_contact_preview_remains_read_only(self):
         record = self.email()
-        preview = self.client.get(
-            f"/api/followup-preview/{record.id}", headers=self.auth(self.owner)
-        )
+        preview = self.client.get(f'/api/followup-preview/{record.id}', headers=self.auth(self.owner))
         self.assertEqual(preview.status_code, 200)
-        body = preview.get_json()
-        self.assertEqual(body["to_email"], "director@example.com")
-        self.assertIn("preschool sports programs", body["body"])
-        self.assertEqual(body["subject"], service.FOLLOWUP_SUBJECT)
-
-        with patch.object(service, "send_email_with_attachments", return_value=True) as send:
-            result = self.client.post(
-                "/api/send-followup", json={"email_id": record.id}, headers=self.auth(self.owner)
-            )
-            self.assertEqual(result.status_code, 200)
-            self.assertEqual(send.call_args.kwargs["body"], body["body"])
-            self.assertEqual(send.call_args.kwargs["from_password"], "test-app-password")
-            self.assertTrue(record.followup_sent)
-            self.assertEqual(record.followup_count, 1)
-
-            # The email is 8 days old, so the second (final) follow-up is due too.
-            final = self.client.get(f"/api/followup-preview/{record.id}", headers=self.auth(self.owner))
-            self.assertIn("one last time", final.get_json()["body"])
-            second = self.client.post(
-                "/api/send-followup", json={"email_id": record.id}, headers=self.auth(self.owner))
-            self.assertEqual(second.status_code, 200)
-            self.assertEqual(record.followup_count, 2)
-            self.assertEqual(
-                self.client.post(
-                    "/api/send-followup", json={"email_id": record.id}, headers=self.auth(self.owner)
-                ).status_code,
-                409,
-            )
-            self.assertEqual(send.call_count, 2)
+        self.assertEqual(preview.get_json()['to_email'], 'director@example.com')
+        self.assertIn('preschool sports programs', preview.get_json()['body'])
+        with patch.object(service, 'send_email_with_attachments') as send:
+            result = self.client.post('/api/send-followup', json={'email_id': record.id}, headers=self.auth(self.owner))
+            self.assertEqual(result.status_code, 409)
+            send.assert_not_called()
+        self.assertFalse(record.followup_sent)
 
     def test_recent_responded_and_sent_records_never_send(self):
         records = [
@@ -168,7 +144,7 @@ class FollowupTests(unittest.TestCase):
             result = self.client.post(
                 "/api/send-followup", json={"email_id": record.id}, headers=self.auth(self.owner)
             )
-        self.assertEqual(result.status_code, 500)
+        self.assertEqual(result.status_code, 409)
         self.assertFalse(record.followup_sent)
 
     def test_queue_and_preview_only_expose_owned_due_email(self):
@@ -187,7 +163,7 @@ class FollowupTests(unittest.TestCase):
             self.client.post(
                 "/api/send-followup", json={"email_id": due.id}, headers=self.auth(self.admin)
             ).status_code,
-            404,
+            409,
         )
 
         owner_rows = self.client.get("/api/sent-emails", headers=self.auth(self.owner)).get_json()

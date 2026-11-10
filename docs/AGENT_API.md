@@ -1,5 +1,7 @@
 # PSA Sales agent API
 
+Local item-6 draft: see [AGENT_BATCH_APPROVAL.md](AGENT_BATCH_APPROVAL.md) for opt-in granular permissions and human-approved batch execution. Those changes supersede the older read-only-outreach, 15-tool and no-send statements below, but are not deployed. Existing keys gain no new permissions; the new code requires its migration and the separate item-5 worker. The sibling checkout's unrelated commission edits were preserved separately.
+
 A key-based REST API, Node client/CLI and local MCP stdio bridge so AI assistants (Kairos, Claude, other harnesses) can work in PSA Sales as a specific employee. Nothing here is live until the deploy steps below are run.
 
 ## How access works

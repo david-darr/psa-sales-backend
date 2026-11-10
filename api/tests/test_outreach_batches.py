@@ -63,6 +63,7 @@ class OutreachBase(unittest.TestCase):
         self.addCleanup(env.stop)
         for target, kwargs in (
             (service, {'name': 'open_smtp_connection', 'side_effect': lambda *a, **k: self.fake}),
+            (service, {'name': 'sync_user_mailbox', 'side_effect': lambda *a, **k: {'ready': True}}),
             (outreach, {'name': 'start_worker', 'side_effect': lambda app, bid, token: self.started.append((bid, token))}),
         ):
             patcher = patch.object(target, kwargs['name'], side_effect=kwargs['side_effect'])
@@ -99,7 +100,17 @@ class OutreachBase(unittest.TestCase):
         service.db.session.commit()
 
     def create_batch(self, user, **body):
+        if user.email_password and 'preview_token' not in body and not body.get('template_id') and not body.get('attachment_ids'):
+            preview = self.client.post('/api/email-preview', headers=self.auth(user), json=body)
+            if preview.status_code != 200: return preview
+            body['preview_token'] = preview.get_json()['preview_token']
         return self.client.post('/api/outreach/batches', headers=self.auth(user), json=body)
+
+    def reviewed_retry(self, batch_id, include=False):
+        options = {'include_unconfirmed': include}
+        preview = self.client.post(f'/api/outreach/batches/{batch_id}/retry-preview', headers=self.auth(self.owner), json=options)
+        if preview.status_code == 200: options['preview_token'] = preview.get_json()['preview_token']
+        return self.client.post(f'/api/outreach/batches/{batch_id}/retry', headers=self.auth(self.owner), json=options)
 
     def run_workers(self):
         while self.started:
@@ -250,7 +261,7 @@ class LimitTests(OutreachBase):
         data = self.client.get('/api/outreach/limits', headers=self.auth(self.owner)).get_json()
         self.assertEqual((data['daily_limit'], data['sent_today'], data['remaining'], data['mailbox_connected']),
                          (150, 0, 150, True))
-        self.assertTrue(data['resets_at'].startswith((service.utc_now() + timedelta(days=1)).date().isoformat()))
+        self.assertTrue(data['resets_at'] == outreach.iso(outreach.day_bounds()[1]))
         school = self.school('Maple School')
         self.sent_email(school, 0)
         self.sent_email(school, 3)
@@ -312,11 +323,11 @@ class BatchLifecycleTests(OutreachBase):
         self.run_workers()
         data = self.get_batch(self.owner, created['batch_id'])
         self.assertEqual(set(data), {'id', 'kind', 'status', 'total', 'sent', 'failed', 'skipped', 'created_at',
-                                     'finished_at', 'recipients', 'queued', 'sending', 'cancelled', 'unconfirmed', 'user_id', 'owner_name'})
+                                     'finished_at', 'recipients', 'queued', 'sending', 'cancelled', 'unconfirmed', 'user_id', 'owner_name', 'campaign_id', 'paused_reason'})
         self.assertEqual((data['status'], data['kind'], data['total'], data['sent'], data['failed'], data['skipped']),
                          ('done', 'custom', 2, 2, 0, 0))
         self.assertIsNotNone(data['finished_at'])
-        self.assertEqual(set(data['recipients'][0]), {'school_id', 'school_name', 'email', 'status', 'error', 'sent_at'})
+        self.assertEqual(set(data['recipients'][0]), {'id', 'contact_id', 'school_id', 'school_name', 'email', 'status', 'error', 'sent_at', 'attempts'})
         self.assertEqual(self.fake.sent, [pending.email, contacted.email])
         self.assertEqual(self.fake.messages[0]['Subject'], 'Hello Pending School')
         self.assertIn('Hi Pat, from Owner', self.fake.messages[0].get_payload(0).get_payload(0).get_payload(decode=True).decode())
@@ -365,7 +376,7 @@ class BatchLifecycleTests(OutreachBase):
         self.assertEqual(schools[1].status, 'pending')
 
         self.fake.fail_for = set()
-        retried = self.client.post(f'/api/outreach/batches/{batch_id}/retry', headers=self.auth(self.owner))
+        retried = self.reviewed_retry(batch_id)
         self.assertEqual(retried.status_code, 202)
         self.assertEqual(retried.get_json()['requeued'], 1)
         self.assertEqual(self.get_batch(self.owner, batch_id)['status'], 'queued')
@@ -374,7 +385,7 @@ class BatchLifecycleTests(OutreachBase):
         self.assertEqual((data['status'], data['sent'], data['failed']), ('done', 3, 0))
         self.assertEqual(self.fake.sent.count(schools[0].email), 1)  # sent recipients were never resent
         self.assertEqual(outreach.OutreachRecipient.query.filter_by(school_id=schools[1].id).one().attempts, 2)
-        again = self.client.post(f'/api/outreach/batches/{batch_id}/retry', headers=self.auth(self.owner))
+        again = self.reviewed_retry(batch_id)
         self.assertEqual(again.status_code, 409)
 
     def test_retry_rechecks_the_daily_limit(self):
@@ -384,7 +395,7 @@ class BatchLifecycleTests(OutreachBase):
         self.run_workers()
         self.fake.fail_for = set()
         with patch.dict(os.environ, {'OUTREACH_DAILY_LIMIT': '2'}):
-            result = self.client.post(f'/api/outreach/batches/{batch_id}/retry', headers=self.auth(self.owner))
+            result = self.reviewed_retry(batch_id)
         self.assertEqual(result.status_code, 202)
         self.assertEqual(result.get_json()['requeued'], 2)
         self.assertEqual(result.get_json()['not_retried'], [{'school_id': schools[2].id, 'reason': 'daily_limit'}])
@@ -438,7 +449,7 @@ class BatchLifecycleTests(OutreachBase):
         self.started.clear()
         self.assertEqual(self.get_batch(self.owner, batch_id)['status'], 'stalled')
         self.assertEqual(self.client.get('/api/outreach/batches', headers=self.auth(self.owner)).get_json()['items'][0]['status'], 'stalled')
-        retried = self.client.post(f'/api/outreach/batches/{batch_id}/retry', headers=self.auth(self.owner))
+        retried = self.reviewed_retry(batch_id)
         self.assertEqual((retried.status_code, retried.get_json()['requeued']), (202, 1))
         new_token = self.started[0][1]
         self.assertNotEqual(old_token, new_token)
@@ -452,7 +463,7 @@ class BatchLifecycleTests(OutreachBase):
     def test_active_batch_is_not_retryable_and_fresh_sending_is_not_stalled(self):
         school = self.school('Busy School')
         batch_id = self.create_batch(self.owner, school_ids=[school.id], kind='initial').get_json()['batch_id']
-        self.assertEqual(self.client.post(f'/api/outreach/batches/{batch_id}/retry', headers=self.auth(self.owner)).status_code, 409)
+        self.assertEqual(self.reviewed_retry(batch_id).status_code, 409)
         batch = outreach.OutreachBatch.query.get(batch_id)
         batch.status, batch.heartbeat_at = 'sending', service.utc_now() - timedelta(minutes=14)
         service.db.session.commit()
@@ -470,11 +481,10 @@ class BatchLifecycleTests(OutreachBase):
         self.assertIn('unconfirmed', data['recipients'][0]['error'])
         self.assertEqual(opener.call_count, 2)
 
-        retry = self.client.post(f'/api/outreach/batches/{batch_id}/retry', headers=self.auth(self.owner))
+        retry = self.reviewed_retry(batch_id)
         self.assertEqual((retry.status_code, retry.get_json()['code']), (409, 'nothing_to_retry'))
         with patch.object(service, 'open_smtp_connection', side_effect=lambda *a, **k: self.fake):
-            retry = self.client.post(f'/api/outreach/batches/{batch_id}/retry', headers=self.auth(self.owner),
-                                     json={'include_unconfirmed': True})
+            retry = self.reviewed_retry(batch_id, include=True)
             self.assertEqual((retry.status_code, retry.get_json()['requeued']), (202, 1))
             self.run_workers()
         self.assertEqual(self.get_batch(self.owner, batch_id)['sent'], 2)
@@ -536,7 +546,7 @@ class BatchLifecycleTests(OutreachBase):
         batch = outreach.OutreachBatch.query.get(batch_id)
         batch.status, batch.heartbeat_at = 'sending', service.utc_now() - timedelta(minutes=20)
         service.db.session.commit()
-        retry = self.client.post(f'/api/outreach/batches/{batch_id}/retry', headers=self.auth(self.owner))
+        retry = self.reviewed_retry(batch_id)
         self.assertEqual((retry.status_code, retry.get_json()['requeued']), (202, 2))
         self.run_workers()
         data = self.get_batch(self.owner, batch_id)
@@ -653,14 +663,11 @@ class SafetyRuleTests(OutreachBase):
     def test_old_send_endpoint_no_longer_downgrades_replied(self):
         school = self.school('Replied Old School', status='replied')
         pending = self.school('Pending Old School')
-        with patch.object(service, 'send_emails_over_connection',
-                          side_effect=lambda _a, _b, _c, jobs: [(job, True, None) for job in jobs]):
-            response = self.client.post('/api/send-email', headers=self.auth(self.owner),
-                                        json={'school_ids': [school.id, pending.id]})
-        self.assertEqual(response.status_code, 200)
-        service.db.session.expire_all()
-        self.assertEqual(service.db.session.get(service.SalesSchool, school.id).status, 'replied')
-        self.assertEqual(service.db.session.get(service.SalesSchool, pending.id).status, 'contacted')
+        response = self.client.post('/api/send-email', headers=self.auth(self.owner), json={'school_ids': [school.id, pending.id]})
+        self.assertEqual(response.status_code, 409)
+        self.assertEqual(self.fake.sent, [])
+        self.assertEqual(school.status, 'replied')
+        self.assertEqual(pending.status, 'pending')
 
     def test_followup_batch_threads_marks_followup_sent_and_requires_fresh_inbox(self):
         school = self.school('Follow School', status='contacted')
@@ -766,18 +773,10 @@ class BackwardCompatibilityTests(OutreachBase):
 
     def test_old_send_email_shape_and_blank_email_handling(self):
         good, blank = self.school('Old Good'), self.school('Old Blank', email='')
-        with patch.object(service, 'send_emails_over_connection',
-                          side_effect=lambda _a, _b, _c, jobs: [(job, True, None) for job in jobs]) as send:
-            response = self.client.post('/api/send-email', headers=self.auth(self.owner),
-                                        json={'school_ids': [good.id, blank.id]})
-        self.assertEqual(response.status_code, 200)
-        data = response.get_json()
-        self.assertEqual(set(data), {'status', 'sent_count', 'batches_processed', 'errors'})
-        self.assertEqual((data['status'], data['sent_count'], data['batches_processed']), ('1 emails sent successfully', 1, 1))
-        self.assertEqual(len(data['errors']), 1)
-        self.assertIn('Old Blank', data['errors'][0])
-        self.assertEqual([job['to_email'] for job in send.call_args.args[3]], [good.email])
-        self.assertEqual(self.client.post('/api/send-email', headers=self.auth(self.owner), json={'school_ids': []}).status_code, 400)
+        for ids in ([good.id, blank.id], []):
+            result = self.client.post('/api/send-email', headers=self.auth(self.owner), json={'school_ids': ids})
+            self.assertEqual((result.status_code, result.get_json()['code']), (409, 'review_required'))
+        self.assertEqual(self.fake.sent, [])
 
     def test_send_emails_over_connection_still_reuses_one_connection(self):
         jobs = [{'to_email': f'a{index}@example.test', 'subject': 's', 'body': 'b', 'pdf_files': []} for index in range(3)]
@@ -824,43 +823,23 @@ class AutoFollowupTests(OutreachBase):
         self.run_workers()
         return result
 
-    def test_day_three_then_day_seven_then_nothing(self):
+    def test_review_mode_never_synthesizes_an_employee_approval(self):
         school = self.school('Maple School')
         record = self.sent_email(school, 3.1)
-        fresh = self.school('Fresh School')
-        self.sent_email(fresh, 1)
-
-        self.assertEqual(self.run_job()['queued'], 1)
-        self.assertEqual(self.fake.sent, [school.email])
-        self.assertEqual(record.followup_count, 1)
-        self.assertIn(self.owner.id, self.sync_calls)  # replies were checked before sending
-
-        self.assertEqual(self.run_job()['queued'], 0)  # follow-up 2 is not due until day 7
-        record.sent_at = service.utc_now() - timedelta(days=7.1)
-        for message in service.SentMessage.query.filter_by(sent_email_id=record.id):
-            message.sent_at = service.utc_now() - timedelta(days=4)  # follow-up 1 went out on day 3
-        service.db.session.commit()
-        self.assertEqual(self.run_job()['queued'], 1)
-        self.assertEqual(record.followup_count, 2)
-        self.assertIn('one last time', self.fake.messages[-1].as_string())
-
-        record.sent_at = service.utc_now() - timedelta(days=20)
-        service.db.session.commit()
-        self.assertEqual(self.run_job()['queued'], 0)
-        self.assertEqual(len(self.fake.sent), 2)
-
-    def test_replied_closed_and_outside_hours_are_left_alone(self):
-        answered = self.school('Answered School')
-        self.sent_email(answered, 4, responded=True)
-        closed = self.school('Closed School', status='not_interested')
-        self.sent_email(closed, 4)
-        due = self.school('Due School')
-        self.sent_email(due, 4)
-        with patch.object(outreach, 'in_sending_hours', return_value=False):
-            self.assertEqual(self.run_job(force_hours=False)['queued'], 0)
+        self.assertIn(school.id, outreach.due_followup_school_ids(self.owner))
+        result = self.run_job()
+        self.assertEqual(result['queued'], 0)
+        self.assertIn('Review mode', result['skipped'])
         self.assertEqual(self.fake.sent, [])
-        self.assertEqual(self.run_job()['queued'], 1)
-        self.assertEqual(self.fake.sent, [due.email])
+        self.assertEqual(record.followup_count, 0)
+
+    def test_review_mode_keeps_due_work_visible_without_sending(self):
+        answered = self.school('Answered School'); self.sent_email(answered, 4, responded=True)
+        closed = self.school('Closed School', status='not_interested'); self.sent_email(closed, 4)
+        due = self.school('Due School'); self.sent_email(due, 4)
+        self.assertEqual(outreach.due_followup_school_ids(self.owner), [due.id])
+        self.assertEqual(self.run_job()['queued'], 0)
+        self.assertEqual(self.fake.sent, [])
 
     def test_unsynced_inbox_and_kill_switch_send_nothing(self):
         due = self.school('Due School')

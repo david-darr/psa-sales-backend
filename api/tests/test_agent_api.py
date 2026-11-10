@@ -191,7 +191,7 @@ class AgentApiTests(unittest.TestCase):
     def test_commissions_degrade_until_feature_exists(self):
         key = self.create_key(self.admin)['key']
         with patch.dict(service.app.view_functions):
-            service.app.view_functions.pop('admin_commissions', None)
+            service.app.view_functions.pop('list_program_commissions', None)
             response = self.client.get(BASE + '/commissions', headers=self.bearer(key))
         self.assertEqual(response.status_code, 404)
         self.assertFalse(response.get_json()['available'])

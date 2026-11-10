@@ -1,4 +1,9 @@
-"""Load and fault tests for the outreach batch system (not collected by pytest).
+"""Historical school-only load scenarios and shared fake SMTP fixture.
+
+Current contact-based runner: check_contact_outreach_postgres.py. The CLI below
+refuses the retired scenarios; they assumed unsigned sends and unreviewed retries.
+
+Original harness description:
 
 Runs the real Flask app and real worker threads. Mail goes over a real socket to a local fake
 SMTP server, and data lives in a throwaway local Postgres. It refuses to run unless the database
@@ -634,18 +639,4 @@ SCENARIOS = {'small': s_small, 'medium': s_medium, 'heavy': s_heavy, 'attachment
              'concurrency': s_concurrency, 'faults': s_faults, 'crash': s_crash, 'double': s_double, 'cancel': s_cancel}
 
 if __name__ == '__main__':
-    chosen = sys.argv[1:] or list(SCENARIOS)
-    for key in chosen:
-        try:
-            SCENARIOS[key]()
-        except Exception as exc:
-            import traceback
-            traceback.print_exc()
-            check(key, 'scenario ran without an exception', False, repr(exc)[:200])
-    print('\n==== SUMMARY')
-    for scenario, name, ok, detail in CHECKS:
-        if not ok:
-            print(f'FAIL [{scenario}] {name}  [{detail}]')
-    print(f"{sum(1 for c in CHECKS if c[2])} passed, {sum(1 for c in CHECKS if not c[2])} failed of {len(CHECKS)}")
-    with open(os.path.join(os.environ.get('TEMP', '.'), 'outreach_load_results.json'), 'w') as handle:
-        json.dump([{'scenario': s, 'check': n, 'ok': o, 'detail': d} for s, n, o, d in CHECKS], handle, indent=1)
+    raise SystemExit('Historical school-only scenarios are retired. Run api/tests/check_contact_outreach_postgres.py with CONTACT_OUTREACH_TEST_DATABASE_URL naming the guarded disposable loopback database psa_contact_outreach_test. This module remains the shared local fake SMTP fixture.')

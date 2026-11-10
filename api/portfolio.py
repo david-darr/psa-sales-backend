@@ -7,6 +7,7 @@ rep, everyone else sees only their own schools.
 
 import re
 import time
+from types import SimpleNamespace
 from datetime import datetime, timedelta, timezone
 
 from flask import jsonify, request
@@ -84,6 +85,8 @@ def city_from_address(address):
 
 
 def scope_query(query, model, user):
+    if request.args.get('scope') == 'unassigned':
+        return query.filter(model.user_id.is_(None))
     if not user.admin or request.args.get('scope') == 'mine':
         query = query.filter(model.user_id == user.id)
     return query
@@ -177,6 +180,8 @@ def register_portfolio_routes(app, db, User, School, Activity, SentEmail, Geocod
         for row in closed_rows:
             by_owner.setdefault(row.user_id, []).append(row)
 
+        if all_scope and None in counts:
+            users.append(SimpleNamespace(id=None, name='Unassigned', email='', admin=False))
         reps = []
         for rep in users:
             own = by_owner.get(rep.id, [])
@@ -197,7 +202,7 @@ def register_portfolio_routes(app, db, User, School, Activity, SentEmail, Geocod
                     'contact_name': row.contact_name,
                 })
             reps.append({
-                'id': rep.id, 'name': rep.name, 'email': rep.email, 'admin': bool(rep.admin),
+                'id': rep.id if rep.id is not None else 0, 'name': rep.name, 'email': rep.email, 'admin': bool(rep.admin),
                 'initials': initials(rep.name),
                 'counts': {'total': sum(status_counts.values()), 'pipeline': pipeline,
                            'active': active, 'former': former},
@@ -209,7 +214,7 @@ def register_portfolio_routes(app, db, User, School, Activity, SentEmail, Geocod
         return jsonify(
             scope='all' if all_scope else 'self',
             totals={
-                'reps': len(reps),
+                'reps': sum(rep['id'] != 0 for rep in reps),
                 'total_schools': sum(rep['counts']['total'] for rep in reps),
                 'active_clients': sum(rep['counts']['active'] for rep in reps),
                 'former_clients': sum(rep['counts']['former'] for rep in reps),
@@ -233,23 +238,23 @@ def register_portfolio_routes(app, db, User, School, Activity, SentEmail, Geocod
         owner_id = None
         if owner:
             try:
-                owner_id = int(owner)
+                owner_id = 0 if owner == 'unassigned' else int(owner)
             except ValueError:
                 return jsonify(error='Invalid owner'), 400
         rows = scope_query(db.session.query(
             School.id, School.school_name, School.address, School.status, School.school_type,
-            School.user_id, User.name, School.lat, School.lng, School.closed_at).join(
+            School.user_id, User.name, School.lat, School.lng, School.closed_at).outerjoin(
             User, User.id == School.user_id), School, user).filter(
             School.status.in_(stages)).order_by(School.id).all()
 
         rep_counts = {}
         for row in rows:
-            entry = rep_counts.setdefault(row.user_id, {'id': row.user_id, 'name': row[6], 'count': 0})
+            entry = rep_counts.setdefault(row.user_id, {'id': row.user_id if row.user_id is not None else 0, 'name': row[6] or 'Unassigned', 'count': 0})
             entry['count'] += 1
         reps = sorted(rep_counts.values(), key=lambda rep: (-rep['count'], (rep['name'] or '').lower(), rep['id']))
 
         if owner_id is not None:
-            rows = [row for row in rows if row.user_id == owner_id]
+            rows = [row for row in rows if row.user_id == (None if owner_id == 0 else owner_id)]
         cache = cached_coords([row.address for row in rows if row.lat is None or row.lng is None])
         accounts, unlocated = [], 0
         for row in rows:
@@ -260,7 +265,7 @@ def register_portfolio_routes(app, db, User, School, Activity, SentEmail, Geocod
             accounts.append({
                 'id': row.id, 'school_name': row.school_name, 'address': row.address,
                 'status': row.status, 'school_type': row.school_type, 'owner_id': row.user_id,
-                'owner_name': row[6], 'lat': lat, 'lng': lng, 'closed_at': iso_utc(row.closed_at),
+                'owner_name': row[6] or 'Unassigned', 'lat': lat, 'lng': lng, 'closed_at': iso_utc(row.closed_at),
             })
         return jsonify(accounts=accounts, reps=reps, unlocated=unlocated)
 

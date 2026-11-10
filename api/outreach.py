@@ -17,13 +17,14 @@ import time
 import uuid
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
+from zoneinfo import ZoneInfo
 
 import pytz
 
 from flask import current_app, jsonify, request
 from flask_jwt_extended import get_jwt_identity, jwt_required
 from itsdangerous import BadSignature
-from sqlalchemy import case, exists, func, or_, select, text, update
+from sqlalchemy import and_, case, exists, func, or_, select, text, update
 from sqlalchemy.orm import aliased
 
 from .crm import followup_due_filter
@@ -55,6 +56,7 @@ svc = None
 db = None
 OutreachBatch = None
 OutreachRecipient = None
+OutreachAttempt = None
 
 
 # ---------------------------------------------------------------------------
@@ -70,6 +72,12 @@ def _build_models():
         status = db.Column(db.String(12), nullable=False, default='queued')
         subject = db.Column(db.Text)
         attachments = db.Column(db.Boolean, nullable=False, default=False)
+        template_snapshot = db.Column(db.Text)
+        campaign_id = db.Column(db.String(36))
+        paused_reason = db.Column(db.Text)
+        lease_owner = db.Column(db.String(36))
+        lease_until = db.Column(db.DateTime)
+        available_at = db.Column(db.DateTime)
         worker_token = db.Column(db.String(36))
         created_at = db.Column(db.DateTime, nullable=False, default=lambda: svc.utc_now())
         started_at = db.Column(db.DateTime)
@@ -88,14 +96,29 @@ def _build_models():
         status = db.Column(db.String(12), nullable=False, default='queued')
         error = db.Column(db.Text)
         attempts = db.Column(db.Integer, nullable=False, default=0)
+        attempted_at = db.Column(db.DateTime)
         sent_email_id = db.Column(db.Integer, db.ForeignKey('sent_emails.id', ondelete='SET NULL'))
         sent_at = db.Column(db.DateTime)
         subject = db.Column(db.Text)
         body = db.Column(db.Text)
         attachments = db.Column(db.Text)
+        ownership_version = db.Column(db.Integer)
         followup_of_email_id = db.Column(db.Integer, db.ForeignKey('sent_emails.id', ondelete='SET NULL'))
+        contact_id = db.Column(db.Integer, db.ForeignKey('contacts.id'))
+        contact_link_id = db.Column(db.Integer, db.ForeignKey('school_contacts.id', ondelete='SET NULL'))
+        contact_version = db.Column(db.Integer)
+        link_version = db.Column(db.Integer)
 
-    return _OutreachBatch, _OutreachRecipient
+    class _OutreachAttempt(db.Model):
+        __tablename__ = 'outreach_send_attempts'
+        id = db.Column(db.Integer, primary_key=True)
+        recipient_id = db.Column(db.Integer, db.ForeignKey('outreach_recipients.id'), nullable=False)
+        attempt_number = db.Column(db.Integer, nullable=False)
+        started_at = db.Column(db.DateTime, nullable=False, default=now)
+        status = db.Column(db.String(12), nullable=False, default='sending')
+        __table_args__ = (db.UniqueConstraint('recipient_id', 'attempt_number', name='uq_recipient_attempt'),)
+
+    return _OutreachBatch, _OutreachRecipient, _OutreachAttempt
 
 
 # ---------------------------------------------------------------------------
@@ -129,7 +152,14 @@ def send_delay():
 
 
 def day_start():
-    return now().replace(hour=0, minute=0, second=0, microsecond=0)
+    return day_bounds()[0]
+
+
+def day_bounds():
+    local = now().replace(tzinfo=timezone.utc).astimezone(ZoneInfo('America/New_York'))
+    start = local.replace(hour=0, minute=0, second=0, microsecond=0)
+    end = start + timedelta(days=1)
+    return tuple(value.astimezone(timezone.utc).replace(tzinfo=None) for value in (start, end))
 
 
 def current_user():
@@ -170,7 +200,24 @@ def sent_today(user_id):
         svc.SentEmail, svc.SentEmail.id == svc.SentMessage.sent_email_id).filter(
         svc.SentEmail.user_id == user_id, svc.SentMessage.sent_at >= start,
         svc.SentMessage.kind != 'outreach').scalar() or 0
-    return outreach + other
+    tests = db.session.query(func.count(OutreachRecipient.id)).join(OutreachBatch).filter(
+        OutreachBatch.user_id == user_id, OutreachBatch.kind == 'test',
+        OutreachRecipient.status == 'sent', OutreachRecipient.sent_at >= start).scalar() or 0
+    uncertain = uncertain_attempts(user_id)
+    legacy_uncertain = db.session.query(func.count(OutreachRecipient.id)).join(OutreachBatch).filter(
+        OutreachBatch.user_id == user_id, OutreachRecipient.status == 'unconfirmed',
+        ~exists().where(OutreachAttempt.recipient_id == OutreachRecipient.id),
+        func.coalesce(OutreachRecipient.attempted_at, OutreachBatch.created_at) >= start).scalar() or 0
+    return outreach + other + tests + uncertain + legacy_uncertain
+
+
+def uncertain_attempts(user_id, campaign_id=None):
+    query = db.session.query(func.count(OutreachAttempt.id)).join(OutreachRecipient).join(OutreachBatch).filter(
+        OutreachBatch.user_id == user_id, OutreachAttempt.started_at >= day_start(),
+        or_(OutreachAttempt.status == 'unconfirmed', and_(OutreachAttempt.status == 'sending',
+            OutreachAttempt.started_at < now() - STALL_AFTER)))
+    if campaign_id is not None: query = query.filter(OutreachBatch.campaign_id == campaign_id)
+    return query.scalar() or 0
 
 
 def reserved_count(user_id):
@@ -183,8 +230,21 @@ def reserved_count(user_id):
         OutreachRecipient.status.in_(('queued', 'sending'))).scalar() or 0
 
 
+def campaign_used(user_id, campaign_id, include_reservations=True):
+    actual = or_(and_(OutreachRecipient.status == 'sent', OutreachRecipient.sent_at >= day_start()),
+                 and_(OutreachRecipient.status == 'unconfirmed',
+                      ~exists().where(OutreachAttempt.recipient_id == OutreachRecipient.id),
+                      func.coalesce(OutreachRecipient.attempted_at, OutreachBatch.created_at) >= day_start()))
+    if include_reservations:
+        actual = or_(actual, and_(OutreachRecipient.status.in_(('queued', 'sending')),
+            OutreachBatch.status.in_(('queued', 'sending')), OutreachBatch.heartbeat_at >= now() - STALL_AFTER))
+    counted = db.session.query(func.count(OutreachRecipient.id)).join(OutreachBatch).filter(
+        OutreachBatch.user_id == user_id, OutreachBatch.campaign_id == campaign_id, actual).scalar() or 0
+    return counted + uncertain_attempts(user_id, campaign_id)
+
+
 def limits_for(user):
-    limit = daily_limit()
+    limit = mailbox_limit()
     sent = sent_today(user.id)
     reserved = reserved_count(user.id)
     return {
@@ -192,12 +252,21 @@ def limits_for(user):
         'sent_today': sent,
         'remaining': max(0, limit - sent - reserved),
         'reserved': reserved,
-        'resets_at': iso(day_start() + timedelta(days=1)),
+        'resets_at': iso(day_bounds()[1]),
+        'time_zone': 'America/New_York',
         'mailbox_connected': bool(user.email_password),
     }
 
 
+def mailbox_limit():
+    try: configured = max(1, int(os.getenv('OUTREACH_MAILBOX_DAILY_LIMIT', str(daily_limit()))))
+    except ValueError: configured = daily_limit()
+    return min(daily_limit(), configured)
+
+
 def effective_status(batch):
+    if batch.status == 'queued' and batch.available_at and batch.available_at > now():
+        return 'queued'
     if batch.status in ('queued', 'sending') and batch.heartbeat_at and now() - batch.heartbeat_at > STALL_AFTER:
         return 'stalled'
     return batch.status
@@ -221,7 +290,8 @@ def school_rows_query():
         SE.sales_school_id.label('sid'), func.max(SM.sent_at).label('last_message_at'),
     ).join(SM, SM.sent_email_id == SE.id).filter(
         SE.sales_school_id.isnot(None)).group_by(SE.sales_school_id).subquery('message_agg')
-    suppressed = exists().where(SA.sales_school_id == S.id, SA.kind.in_(SUPPRESSION_KINDS)).correlate(S)
+    suppressed = or_(exists().where(SA.sales_school_id == S.id, SA.kind.in_(SUPPRESSION_KINDS)).correlate(S),
+        exists().where(svc.Contact.email == func.lower(func.trim(S.email)), svc.Contact.do_not_contact.is_(True)).correlate(S))
     query = db.session.query(
         S, Latest, email_agg.c.last_email_at, email_agg.c.responded_any, message_agg.c.last_message_at,
         suppressed.label('suppressed'), Owner.name.label('owner_name'),
@@ -236,11 +306,11 @@ def school_rows_query():
 def chosen_email(school, latest, kind):
     """Follow-ups go back to the address that was originally emailed; others to the first valid one."""
     if kind == 'followup' and latest is not None:
-        return (latest.school_email or '').strip()
+        return (latest.school_email or '').strip().casefold()
     for item in school.get_all_emails():
         if svc.valid_email(item):
-            return item.strip()
-    return (school.email or '').strip()
+            return item.strip().casefold()
+    return (school.email or '').strip().casefold()
 
 
 def in_flight_school_ids(school_ids):
@@ -266,6 +336,9 @@ def compute_blockers(kind, row, viewer_id, in_flight=frozenset()):
         blockers.add('missing_email')
     if suppressed:
         blockers.add('unsubscribed')
+    if normalized_email := chosen_email(school, latest, kind):
+        if normalized_email.strip().casefold() != (school.email or '').strip().casefold() and svc.contact_is_blocked(normalized_email):
+            blockers.add('unsubscribed')
     if school.status in CLOSED_STAGES:
         blockers.add('closed')
     if school.status in REPLIED_STAGES or responded_any:
@@ -289,8 +362,22 @@ def compute_blockers(kind, row, viewer_id, in_flight=frozenset()):
     return [name for name in BLOCKER_ORDER if name in blockers]
 
 
-def build_content(kind, user, school, latest, subject, body, attachments):
+def combined_files(defaults, extras):
+    return list({item['id']: item for item in [*defaults, *extras]}.values())
+
+
+def build_content(kind, user, school, latest, subject, body, attachments, template=None, catalog_files=None):
     """Render one recipient's message with the existing templates; never duplicates them."""
+    if template:
+        from .template_library import render_copy
+        if kind == 'followup' and (latest is None or template['step'] != svc.followup_stage(latest) + 1):
+            raise ValueError('The follow-up template step does not match ' + school.school_name + '. Select recipients at the same step.')
+        rendered_subject, text = render_copy(subject if subject is not None else template['subject'],
+                                            body if body is not None else template['body'], school, user)
+        return {'subject': rendered_subject, 'body': text,
+                'pdf_files': ['template-asset:' + item['id'] for item in combined_files(template.get('attachments', []), catalog_files or [])],
+                'attachment_names': [item['name'] for item in combined_files(template.get('attachments', []), catalog_files or [])],
+                'template': template, 'ownership_version': school.ownership_version}
     pdf_files = []
     if kind == 'followup':
         if body:
@@ -307,17 +394,26 @@ def build_content(kind, user, school, latest, subject, body, attachments):
         wants_files = attachments is True or (attachments is None and kind == 'initial')
         if wants_files:
             pdf_files = list(template_job['pdf_files'])
-    return {'subject': rendered_subject, 'body': text, 'pdf_files': pdf_files}
+    if catalog_files is not None:
+        pdf_files = ['template-asset:' + item['id'] for item in catalog_files]
+    return {'subject': rendered_subject, 'body': text, 'pdf_files': pdf_files,
+            'attachment_names': [item['name'] for item in catalog_files] if catalog_files is not None else pdf_files,
+            'ownership_version': school.ownership_version}
 
 
 def fingerprint(email_address, content):
-    return svc.outreach_fingerprint({
+    original = svc.outreach_fingerprint({
         'to_email': email_address, 'subject': content['subject'],
         'body': content['body'], 'pdf_files': content['pdf_files']})
+    import hashlib
+    metadata = {'template': content.get('template'), 'ownership_version': content['ownership_version']}
+    return hashlib.sha256((original + json.dumps(metadata, sort_keys=True)).encode()).hexdigest()
 
 
-def parse_request_options(data, max_schools):
+def parse_request_options(data, max_schools, preview_limit=MAX_PREVIEW_SCHOOLS):
     """Validate the fields shared by preview and batch creation. Returns (options, error_response)."""
+    if not isinstance(data, dict):
+        return None, (jsonify(error='Supply an outreach request object'), 400)
     ids = data.get('school_ids')
     if (not isinstance(ids, list) or not 1 <= len(ids) <= max_schools
             or any(type(value) is not int or value < 1 for value in ids)):
@@ -334,8 +430,20 @@ def parse_request_options(data, max_schools):
         return None, (jsonify(error='attachments must be true or false'), 400)
     if kind == 'custom' and (subject is None or body is None):
         return None, (jsonify(error='A custom email needs a subject and a message'), 400)
+    try:
+        template = svc.resolve_mail_template(data)
+        catalog_files = svc.select_catalog_attachments(data['attachment_ids']) if 'attachment_ids' in data else None
+        files = combined_files((template or {}).get('attachments', []), catalog_files or [])
+        if len(files) > 3 or sum(item['bytes'] for item in files) > 15 * 1024 * 1024:
+            raise ValueError('Choose up to three PDFs, totaling at most 15 MB including template defaults.')
+        if catalog_files is not None and attachments:
+            raise ValueError('Select catalog PDFs instead of the all-flyers checkbox.')
+    except ValueError as exc:
+        return None, (jsonify(error=str(exc)), 400)
+    if (template or catalog_files) and len(ids) > preview_limit:
+        return None, (jsonify(error=f'Shared-template batches require review of every recipient. Select at most {preview_limit} schools.'), 400)
     unique = list(dict.fromkeys(ids))
-    return {'ids': unique, 'kind': kind, 'subject': subject, 'body': body, 'attachments': attachments}, None
+    return {'ids': unique, 'kind': kind, 'subject': subject, 'body': body, 'attachments': attachments, 'template': template, 'catalog_files': catalog_files}, None
 
 
 def owned_rows(user, ids):
@@ -360,6 +468,8 @@ def preview_response(data):
     user = current_user()
     if not user:
         return jsonify(error='User not found'), 404
+    if data.get('contact_mode') is True:
+        return svc.preview_contact_outreach(user, options, data)
     rows = owned_rows(user, options['ids'])
     if rows is None:
         return jsonify(error='Send only to schools assigned to you'), 403
@@ -369,7 +479,10 @@ def preview_response(data):
     for row in rows:
         school, latest = row[0], row[1]
         blockers = compute_blockers(kind, row, user.id, busy)
-        content = build_content(kind, user, school, latest, options['subject'], options['body'], options['attachments'])
+        try:
+            content = build_content(kind, user, school, latest, options['subject'], options['body'], options['attachments'], options.get('template'), options.get('catalog_files'))
+        except ValueError as exc:
+            return jsonify(error=str(exc)), 400
         address = chosen_email(school, latest, kind)
         plain, html_body = svc.render_body_parts(content['body'])
         warnings = [name for name in blockers if name in PREVIEW_WARNINGS]
@@ -379,7 +492,7 @@ def preview_response(data):
         previews.append({
             'school_id': school.id, 'school_name': school.school_name, 'email': address,
             'subject': content['subject'], 'body_html': html_body, 'body_text': plain,
-            'warnings': warnings, 'attachments': content['pdf_files'],
+            'warnings': warnings, 'attachments': content['attachment_names'],
             'eligible': not blockers, 'blockers': blockers,
         })
     token = svc.outreach_review_signer().dumps({'uid': user.id, 'fingerprints': fingerprints})
@@ -410,11 +523,22 @@ def batch_dict(batch, counts, recipients=None):
         'cancelled': counts.get('cancelled', 0), 'unconfirmed': counts.get('unconfirmed', 0),
         'created_at': iso(batch.created_at), 'finished_at': iso(batch.finished_at),
         'user_id': batch.user_id, 'owner_name': batch.owner.name if batch.owner else None,
+        'campaign_id': batch.campaign_id, 'paused_reason': batch.paused_reason,
     }
+    if batch.template_snapshot:
+        data['template'] = json.loads(batch.template_snapshot)
     if recipients is not None:
+        attempts = OutreachAttempt.query.filter(OutreachAttempt.recipient_id.in_([r.id for r in recipients])).order_by(
+            OutreachAttempt.recipient_id, OutreachAttempt.attempt_number).all()
+        attempt_history = {}
+        for attempt in attempts:
+            attempt_history.setdefault(attempt.recipient_id, []).append(dict(number=attempt.attempt_number,
+                status=attempt.status, started_at=iso(attempt.started_at)))
         data['recipients'] = [{
+            'id': item.id, 'contact_id': item.contact_id,
             'school_id': item.school_id, 'school_name': item.school_name, 'email': item.email,
             'status': item.status, 'error': item.error, 'sent_at': iso(item.sent_at),
+            'attempts': attempt_history.get(item.id, []),
         } for item in recipients]
     return data
 
@@ -433,17 +557,15 @@ def accessible_batch(user, batch_id, lock=False):
 # ---------------------------------------------------------------------------
 
 def start_worker(app, batch_id, token):
-    thread = threading.Thread(target=run_batch, args=(app, batch_id, token),
-                              name=f'outreach-batch-{batch_id}', daemon=True)
-    thread.start()
-    return thread
+    """Durable queue only. The dedicated worker polls committed batches."""
+    return None
 
 
-def run_batch(app, batch_id, token, delay=None):
+def run_batch(app, batch_id, token, delay=None, max_recipients=None):
     """Thread entry point. Never raises; every failure is recorded on the recipient or batch."""
     with app.app_context():
         try:
-            _process_batch(batch_id, token, send_delay() if delay is None else delay)
+            _process_batch(batch_id, token, send_delay() if delay is None else delay, max_recipients)
         except Exception:
             db.session.rollback()
             log.exception('Outreach batch %s worker crashed', batch_id)
@@ -452,17 +574,19 @@ def run_batch(app, batch_id, token, delay=None):
 
 
 def _touch(batch_id):
-    db.session.execute(update(OutreachBatch).where(OutreachBatch.id == batch_id).values(heartbeat_at=now()))
+    db.session.execute(update(OutreachBatch).where(OutreachBatch.id == batch_id).values(heartbeat_at=now(),
+        lease_until=case((OutreachBatch.lease_owner.isnot(None), now()+timedelta(minutes=5)), else_=None)))
 
 
 def _fail_remaining(batch_id, error):
     db.session.execute(update(OutreachRecipient).where(
         OutreachRecipient.batch_id == batch_id, OutreachRecipient.status == 'queued'
-    ).values(status='failed', error=clean_error(error)))
+    ).values(status=case((exists().where(OutreachAttempt.recipient_id == OutreachRecipient.id,
+        OutreachAttempt.status == 'unconfirmed'), 'unconfirmed'), else_='failed'), error=clean_error(error)))
     db.session.commit()
 
 
-def _process_batch(batch_id, token, delay):
+def _process_batch(batch_id, token, delay, max_recipients=None):
     claimed = db.session.execute(update(OutreachBatch).where(
         OutreachBatch.id == batch_id, OutreachBatch.worker_token == token, OutreachBatch.status == 'queued'
     ).values(status='sending', started_at=func.coalesce(OutreachBatch.started_at, now()),
@@ -480,10 +604,13 @@ def _process_batch(batch_id, token, delay):
         return
     sender = svc.SmtpSender(user.email, password, user.name)
     # Plain values: the session is rolled back around every send, which would otherwise reload these rows each time.
-    batch_ctx = SimpleNamespace(id=batch.id, kind=batch.kind, user_id=batch.user_id)
+    batch_ctx = SimpleNamespace(id=batch.id, kind=batch.kind, user_id=batch.user_id, campaign_id=batch.campaign_id)
     user_id = user.id
     quota = {'sent': None, 'since_check': 0}
     pause = False
+    chunk_sent = 0
+    processed = 0
+    contact_mode = batch_ctx.kind not in ('reply', 'test')
     try:
         while True:
             if pause and delay:
@@ -495,23 +622,64 @@ def _process_batch(batch_id, token, delay):
                 OutreachBatch.id == batch_id)).one_or_none()
             if live is None or live.worker_token != token or live.status != 'sending':
                 break  # cancelled, retried by a newer worker, or deleted
+            if hasattr(svc,'campaign_dispatch_gate') and svc.campaign_dispatch_gate(batch_id):break
+            if max_recipients is not None and processed >= max_recipients:
+                if not OutreachRecipient.query.filter_by(batch_id=batch_id, status='queued').first(): break
+                db.session.execute(update(OutreachBatch).where(OutreachBatch.id==batch_id,
+                    OutreachBatch.worker_token==token, OutreachBatch.status=='sending').values(
+                    status='queued', lease_owner=None, lease_until=None, heartbeat_at=now()))
+                db.session.commit(); break
+            if contact_mode and batch_ctx.kind != 'reply' and chunk_sent >= 5:
+                db.session.rollback()
+                try:
+                    state = svc.sync_user_mailbox(db.session.get(svc.User, user_id))
+                    ready = state.get('ready', False)
+                except Exception:
+                    ready = False
+                    db.session.rollback()
+                if not ready:
+                    db.session.execute(update(OutreachBatch).where(OutreachBatch.id == batch_id,
+                        OutreachBatch.status == 'sending').values(status='paused', paused_reason='Inbox check incomplete. Check replies, then review remaining messages.'))
+                    db.session.commit()
+                    break
+                chunk_sent = 0
+                continue  # sync may have paused/cancelled the batch; re-read it before claiming another row
             recipient = db.session.execute(select(
                 OutreachRecipient.id, OutreachRecipient.school_id, OutreachRecipient.email,
                 OutreachRecipient.subject, OutreachRecipient.body, OutreachRecipient.attachments,
-                OutreachRecipient.followup_of_email_id,
+                OutreachRecipient.followup_of_email_id, OutreachRecipient.ownership_version,
+                OutreachRecipient.contact_id, OutreachRecipient.contact_link_id,
+                OutreachRecipient.contact_version, OutreachRecipient.link_version,
             ).where(OutreachRecipient.batch_id == batch_id, OutreachRecipient.status == 'queued').order_by(
                 OutreachRecipient.position, OutreachRecipient.id).limit(1)).one_or_none()
             if recipient is None:
                 break
             claimed_row = db.session.execute(update(OutreachRecipient).where(
                 OutreachRecipient.id == recipient.id, OutreachRecipient.status == 'queued'
-            ).values(status='sending', attempts=OutreachRecipient.attempts + 1)).rowcount
+            ).values(status='sending', attempts=OutreachRecipient.attempts + 1, attempted_at=now())).rowcount
             _touch(batch_id)
             db.session.commit()
             if not claimed_row:
                 pause = False
                 continue
+            attempt = OutreachAttempt(recipient_id=recipient.id,
+                attempt_number=db.session.get(OutreachRecipient, recipient.id).attempts, status='sending')
+            db.session.add(attempt)
+            db.session.commit()
+            attempt_id = attempt.id
             outcome = _process_recipient(batch_ctx, user_id, recipient, sender, quota)
+            processed += 1
+            if outcome == 'unconfirmed' and quota['sent'] is not None:
+                quota['sent'] += 1
+                quota['since_check'] += 1
+            result_status = db.session.execute(select(OutreachRecipient.status).where(OutreachRecipient.id == recipient.id)).scalar()
+            if result_status == 'failed' and OutreachAttempt.query.filter_by(recipient_id=recipient.id, status='unconfirmed').first():
+                db.session.execute(update(OutreachRecipient).where(OutreachRecipient.id == recipient.id).values(
+                    status='unconfirmed', error='This attempt failed, but an earlier attempt is still unconfirmed. Check Sent mail before another resend.'))
+            db.session.execute(update(OutreachAttempt).where(OutreachAttempt.id == attempt_id).values(status=result_status))
+            svc.sequence_result(recipient.id)
+            db.session.commit()
+            if outcome in ('sent', 'unconfirmed', 'failed'): chunk_sent += 1
             pause = outcome != 'skipped'
             if outcome == 'stop':
                 break
@@ -526,23 +694,67 @@ def mark_stalled_unconfirmed(batch_id):
         OutreachRecipient.batch_id == batch_id, OutreachRecipient.status == 'sending'
     ).values(status='unconfirmed',
              error='The app stopped while this was sending. Check your Sent mail before sending again.'))
+    db.session.execute(update(OutreachAttempt).where(OutreachAttempt.recipient_id.in_(
+        select(OutreachRecipient.id).where(OutreachRecipient.batch_id == batch_id)),
+        OutreachAttempt.status == 'sending').values(status='unconfirmed'))
+
+
+def retry_candidates(batch, include_unconfirmed):
+    states = ['failed']
+    if effective_status(batch) in ('stalled', 'paused'): states.append('queued')
+    if include_unconfirmed: states.append('unconfirmed')
+    return OutreachRecipient.query.filter(OutreachRecipient.batch_id == batch.id,
+        OutreachRecipient.status.in_(states)).order_by(OutreachRecipient.position, OutreachRecipient.id).all()
+
+
+def retry_digest(batch, candidates):
+    import hashlib
+    rows = [(row.id, row.status, row.attempts, svc.outreach_fingerprint(dict(
+        to_email=row.email, subject=row.subject or '', body=row.body or '', pdf_files=json.loads(row.attachments or '[]')))) for row in candidates]
+    return hashlib.sha256(json.dumps([batch.worker_token, batch.status, batch.paused_reason, rows]).encode()).hexdigest()
 
 
 def _finish(batch_id, token):
     db.session.execute(update(OutreachBatch).where(
         OutreachBatch.id == batch_id, OutreachBatch.worker_token == token, OutreachBatch.status == 'sending'
-    ).values(status='done', finished_at=now(), heartbeat_at=now()))
+    ).values(status='done', finished_at=now(), heartbeat_at=now(), lease_owner=None, lease_until=None))
     db.session.commit()
 
 
 def skip_reason(batch, recipient, school):
     """Re-check the rules right before sending; the world may have changed since queueing."""
+    if hasattr(svc,'agent_batch_guard'):
+        reason=svc.agent_batch_guard(batch.id)
+        if reason:return reason
+    if hasattr(svc,'campaign_recipient_guard'):
+        reason=svc.campaign_recipient_guard(recipient)
+        if reason:return reason
+    if batch.kind == 'test':
+        user = db.session.get(svc.User, batch.user_id)
+        return None if user and recipient.email == user.email and not svc.contact_is_blocked(recipient.email) else 'invalid_test_destination'
+    if getattr(recipient, 'contact_id', None):
+        if getattr(batch, 'campaign_id', None) and not svc.ContactOutreachLedger.query.filter_by(recipient_id=recipient.id).first():
+            return 'superseded_review'
+        contact = db.session.get(svc.Contact, recipient.contact_id)
+        link = db.session.get(svc.SchoolContact, recipient.contact_link_id)
+        if not contact or contact.email != recipient.email or svc.contact_is_blocked(contact.email):
+            return 'unsubscribed'
+        if not link or link.contact_id != contact.id or link.school_id != recipient.school_id or link.version != recipient.link_version or contact.version != recipient.contact_version:
+            return 'contact_changed'
     if school is None:
         return 'school_deleted'
     if school.user_id != batch.user_id:
         return 'not_owner'
+    saved_owner_version = getattr(recipient, 'ownership_version', None)
+    if (saved_owner_version is None and school.ownership_version != 0) or (saved_owner_version is not None and saved_owner_version != school.ownership_version):
+        return 'owner_changed'
     if not svc.valid_email(recipient.email):
         return 'missing_email'
+    if svc.contact_is_blocked(recipient.email):
+        return 'unsubscribed'
+    if batch.kind == 'reply':
+        original = db.session.get(svc.SentEmail, recipient.followup_of_email_id)
+        return None if original and original.user_id == batch.user_id and original.school_email.casefold() == recipient.email.casefold() else 'conversation_changed'
     if school.status in CLOSED_STAGES:
         return 'closed'
     if school.status in REPLIED_STAGES:
@@ -554,14 +766,22 @@ def skip_reason(batch, recipient, school):
     )).one()
     if unsubscribed:
         return 'unsubscribed'
+    if batch.kind == 'sequence':
+        if not svc.mail_sync_status(batch.user_id)['ready']: return 'inbox_not_synced'
+        return svc.sequence_send_guard(recipient.id)
     if batch.kind == 'followup':
+        if not svc.mail_sync_status(batch.user_id)['ready']:
+            return 'inbox_not_synced'
         original = db.session.get(svc.SentEmail, recipient.followup_of_email_id) if recipient.followup_of_email_id else None
+        if original and original.sequence_managed: return 'sequence_managed'
         due_at = svc.followup_due_at(original) if original is not None else None
+        if original and original.sent_at < now() - timedelta(days=svc.FOLLOWUP_MAX_AGE_DAYS):
+            return 'not_due'
         if due_at is None or now() < due_at:
             return 'not_due'
         if original.responded:
             return 'replied'
-    elif replied:
+    elif replied and getattr(batch, 'campaign_id', None) in (None, 'standard'):
         return 'replied'
     return None
 
@@ -569,9 +789,14 @@ def skip_reason(batch, recipient, school):
 QUOTA_RECHECK_EVERY = 10
 
 
-def _under_daily_limit(user_id, quota):
+def _under_daily_limit(user_id, quota, batch=None):
     """Count today's sends once, track our own sends locally, and re-query every few sends or near the limit."""
-    limit = daily_limit()
+    limit = mailbox_limit()
+    if batch is not None and getattr(batch, 'campaign_id', None) not in (None, 'standard'):
+        campaign = db.session.get(svc.OutreachCampaign, batch.campaign_id)
+        if campaign is None or campaign.archived: return False
+        used = campaign_used(user_id, campaign.id, include_reservations=False)
+        if used >= campaign.daily_limit: return False
     sent = quota['sent']
     if sent is None or quota['since_check'] >= QUOTA_RECHECK_EVERY or limit - sent <= QUOTA_RECHECK_EVERY:
         sent = quota['sent'] = sent_today(user_id)
@@ -592,7 +817,7 @@ def _process_recipient(batch, user_id, recipient, sender, quota):
     recipient_id, batch_id = recipient.id, batch.id
     school = db.session.get(svc.SalesSchool, recipient.school_id) if recipient.school_id else None
     reason = skip_reason(batch, recipient, school)
-    if reason is None and not _under_daily_limit(user_id, quota):
+    if reason is None and not _under_daily_limit(user_id, quota, batch):
         reason = 'daily_limit'
     if reason:
         db.session.execute(update(OutreachRecipient).where(OutreachRecipient.id == recipient_id).values(
@@ -603,11 +828,14 @@ def _process_recipient(batch, user_id, recipient, sender, quota):
     job = {'to_email': recipient.email, 'subject': recipient.subject or '', 'body': recipient.body or '',
            'pdf_files': json.loads(recipient.attachments or '[]')}
     original = None
-    if batch.kind == 'followup' and recipient.followup_of_email_id:
+    if batch.kind in ('followup', 'reply', 'sequence') and recipient.followup_of_email_id:
         original = db.session.get(svc.SentEmail, recipient.followup_of_email_id)
         latest = svc.SentMessage.query.filter_by(sent_email_id=original.id).order_by(
-            svc.SentMessage.sent_at.desc()).first() if original else None
+            svc.SentMessage.sent_at.desc(), svc.SentMessage.id.desc()).first() if original else None
         job['in_reply_to'] = latest.message_id if latest else None
+        if batch.kind == 'sequence' and original:
+            ids = [m.message_id for m in svc.SentMessage.query.filter_by(sent_email_id=original.id).order_by(svc.SentMessage.sent_at, svc.SentMessage.id) if m.message_id]
+            job['references'] = ' '.join(dict.fromkeys(ids[-20:]))
 
     # Everything below talks to the mail provider and can take seconds: do it without holding a pooled connection.
     db.session.rollback()
@@ -628,6 +856,8 @@ def _process_recipient(batch, user_id, recipient, sender, quota):
     except svc.AmbiguousDelivery as exc:
         db.session.execute(update(OutreachRecipient).where(OutreachRecipient.id == recipient_id).values(
             status='unconfirmed', error=clean_error(exc)))
+        db.session.execute(update(OutreachAttempt).where(OutreachAttempt.recipient_id == recipient_id,
+            OutreachAttempt.status == 'sending').values(status='unconfirmed'))
         db.session.commit()
         sender.close()
         return 'unconfirmed'
@@ -637,6 +867,12 @@ def _process_recipient(batch, user_id, recipient, sender, quota):
             status='failed', error=error))
         db.session.commit()
         sender.reset()
+        from .mail_feedback import hard_bounce
+        if hard_bounce(exc):
+            svc.record_mail_signal(recipient.email, 'hard_bounce', f'smtp:{recipient_id}:{uuid.uuid4()}',
+                                   'SMTP rejected the recipient: 5.1.1', actor_id=user_id, batch_id=batch_id)
+            db.session.commit()
+            return 'stop'
         if _looks_like_quota(exc):
             _fail_remaining(batch_id, 'Mail provider sending limit reached: ' + error)
             return 'stop'
@@ -654,12 +890,28 @@ def _process_recipient(batch, user_id, recipient, sender, quota):
             log.exception('Could not record a sent outreach email (recipient %s, attempt %s)', recipient_id, attempt + 1)
     db.session.execute(update(OutreachRecipient).where(OutreachRecipient.id == recipient_id).values(
         status='unconfirmed', error='Sent, but not recorded. Check your Sent mail before sending again.'))
+    db.session.execute(update(OutreachAttempt).where(OutreachAttempt.recipient_id == recipient_id,
+        OutreachAttempt.status == 'sending').values(status='unconfirmed'))
     db.session.commit()
     return 'unconfirmed'
 
 
 def _record_success(batch, user_id, recipient, school, original, job):
-    if batch.kind == 'followup' and original is not None:
+    if batch.kind == 'test':
+        db.session.execute(update(OutreachRecipient).where(OutreachRecipient.id == recipient.id).values(
+            status='sent', sent_at=now(), error=None))
+        _touch(batch.id)
+        db.session.commit()
+        return
+    if batch.kind == 'sequence' and original is not None:
+        original = db.session.get(svc.SentEmail, original.id)
+        svc.record_outbound_message(original, job.get('message_id'), recipient.subject, 'sequence_followup')
+        sent_email = original
+    elif batch.kind == 'reply' and original is not None:
+        original = db.session.get(svc.SentEmail, original.id)
+        svc.record_outbound_message(original, job.get('message_id'), recipient.subject, 'reply')
+        sent_email = original
+    elif batch.kind == 'followup' and original is not None:
         original = db.session.get(svc.SentEmail, original.id)
         svc.mark_followup_sent(original)
         svc.record_outbound_message(original, job.get('message_id'), recipient.subject, 'followup')
@@ -685,6 +937,8 @@ def queue_batch(user, options, token=None):
     Shared by the Outreach screen and the automatic follow-up job so both apply the same rules.
     """
     kind = options['kind']
+    if not token:
+        return dict(error='Review every message before sending.'), 409, None
     if kind == 'followup' and not svc.mail_sync_status(user.id)['ready']:
         return dict(error='Check your inbox before sending follow-ups', code='inbox_not_synced'), 409, None
     # Serialize this user's batch creation so two requests cannot both see a school as free.
@@ -694,19 +948,28 @@ def queue_batch(user, options, token=None):
         return dict(error='Send only to schools assigned to you'), 403, None
 
     accepted, skipped = [], []
+    contact_entries = {row[0].id: (contact, step) for row, contact, step in svc.legacy_contact_entries(rows, kind, lock=True)}
     busy = in_flight_school_ids(row[0].id for row in rows)
+    accepted_addresses = set()
     for row in rows:
         blockers = compute_blockers(kind, row, user.id, busy)
+        contact, step = contact_entries[row[0].id]
+        if contact is None or svc.contact_step_reserved(contact, step) or contact.email in accepted_addresses:
+            blockers.append('campaign_already_contacted')
         if blockers:
             skipped.append((row, blockers[0]))
         else:
             accepted.append(row)
+            accepted_addresses.add(contact.email)
 
     contents = {}
     for row in accepted:
         school, latest = row[0], row[1]
-        contents[school.id] = build_content(
-            kind, user, school, latest, options['subject'], options['body'], options['attachments'])
+        try:
+            contents[school.id] = build_content(
+                kind, user, school, latest, options['subject'], options['body'], options['attachments'], options.get('template'), options.get('catalog_files'))
+        except ValueError as exc:
+            return dict(error=str(exc)), 400, None
     if token is not None:
         try:
             review = svc.outreach_review_signer().loads(token, max_age=900)
@@ -729,7 +992,10 @@ def queue_batch(user, options, token=None):
                        skipped=[{'school_id': row[0].id, 'reason': reason} for row, reason in skipped]), 400, None
 
     batch = OutreachBatch(user_id=user.id, kind=kind, status='queued', subject=options['subject'],
-                          attachments=bool(options['attachments']), worker_token=str(uuid.uuid4()))
+                          campaign_id='standard',
+                          attachments=bool(options['attachments'] or (options.get('template') or {}).get('attachment_id') or options.get('catalog_files')),
+                          template_snapshot=json.dumps(options['template']) if options.get('template') else None,
+                          worker_token=str(uuid.uuid4()))
     db.session.add(batch)
     db.session.flush()
     skip_by_id = {row[0].id: reason for row, reason in skipped}
@@ -738,11 +1004,17 @@ def queue_batch(user, options, token=None):
         school, latest = row[0], row[1]
         if school.id in allowed_ids:
             content = contents[school.id]
-            db.session.add(OutreachRecipient(
+            contact, step = contact_entries[school.id]
+            link = svc.SchoolContact.query.filter_by(school_id=school.id, contact_id=contact.id).one()
+            recipient = OutreachRecipient(
                 batch_id=batch.id, position=position, school_id=school.id, school_name=school.school_name,
                 email=chosen_email(school, latest, kind), status='queued', subject=content['subject'],
-                body=content['body'], attachments=json.dumps(content['pdf_files']),
-                followup_of_email_id=latest.id if kind == 'followup' and latest is not None else None))
+                body=content['body'], attachments=json.dumps(content['pdf_files']), ownership_version=school.ownership_version,
+                contact_id=contact.id, contact_link_id=link.id, contact_version=contact.version, link_version=link.version,
+                followup_of_email_id=latest.id if kind == 'followup' and latest is not None else None)
+            db.session.add(recipient)
+            db.session.flush()
+            svc.reserve_contact_step(contact, step, recipient)
         else:
             db.session.add(OutreachRecipient(
                 batch_id=batch.id, position=position, school_id=school.id, school_name=school.school_name,
@@ -776,6 +1048,7 @@ def due_followup_school_ids(user):
     query, Latest, _agg = school_rows_query()
     rows = query.filter(
         S.user_id == user.id, Latest.id.isnot(None), Latest.responded.isnot(True),
+        S.status.notin_(tuple(REPLIED_STAGES | CLOSED_STAGES)),
         Latest.user_id == S.user_id, followup_due_filter(Latest, current),
         Latest.sent_at >= current - timedelta(days=svc.FOLLOWUP_MAX_AGE_DAYS),
     ).with_entities(S.id).order_by(Latest.sent_at.asc(), S.id).limit(MAX_BATCH_SCHOOLS).all()
@@ -806,34 +1079,8 @@ def _auto_followups_for(app, user):
 
 
 def run_auto_followups(app, force_hours=False):
-    """Queue due day-3 and day-7 follow-ups for every rep with a connected mailbox.
-
-    Safe to call from every web process: a Postgres advisory lock lets one run at a time.
-    """
-    with app.app_context():
-        if not auto_followups_enabled() or (not force_hours and not in_sending_hours()):
-            return {'queued': 0, 'skipped': 'outside sending hours or disabled'}
-        lock = None
-        if db.engine.dialect.name == 'postgresql':
-            lock = db.engine.connect()
-            if not lock.execute(text('SELECT pg_try_advisory_lock(:k)'), {'k': AUTO_FOLLOWUP_LOCK_KEY}).scalar():
-                lock.close()
-                return {'queued': 0, 'skipped': 'another process is running follow-ups'}
-        queued = 0
-        try:
-            users = svc.User.query.filter(svc.User.email_password.isnot(None)).order_by(svc.User.id).all()
-            for user in users:
-                try:
-                    queued += _auto_followups_for(app, user)
-                except Exception:
-                    db.session.rollback()
-                    log.exception('Automatic follow-ups failed for user %s', user.id)
-        finally:
-            if lock is not None:
-                lock.execute(text('SELECT pg_advisory_unlock(:k)'), {'k': AUTO_FOLLOWUP_LOCK_KEY})
-                lock.close()
-            db.session.remove()
-        return {'queued': queued}
+    """Review mode cannot manufacture a rep approval. Automatic campaigns come next."""
+    return {'queued': 0, 'skipped': 'Review mode: approve follow-ups in Outreach'}
 
 
 # ---------------------------------------------------------------------------
@@ -841,11 +1088,20 @@ def run_auto_followups(app, force_hours=False):
 # ---------------------------------------------------------------------------
 
 def register_outreach_routes(app, database, service):
-    global svc, db, OutreachBatch, OutreachRecipient
+    global svc, db, OutreachBatch, OutreachRecipient, OutreachAttempt
     svc, db = service, database
     if OutreachBatch is None:
-        OutreachBatch, OutreachRecipient = _build_models()
+        OutreachBatch, OutreachRecipient, OutreachAttempt = _build_models()
     service.OutreachBatch, service.OutreachRecipient = OutreachBatch, OutreachRecipient
+    service.OutreachAttempt = OutreachAttempt
+    from .contact_outreach import register_contact_outreach
+    register_contact_outreach(app, db, service, __import__(__name__, fromlist=['']))
+    from .mail_feedback import register_mail_feedback
+    register_mail_feedback(app, db, service, __import__(__name__, fromlist=['']))
+    from .sequences import register_sequences
+    register_sequences(app, db, service, __import__(__name__, fromlist=['']))
+    from .outreach_worker import register_worker
+    register_worker(app, db, service, __import__(__name__, fromlist=['']))
 
     def page_args():
         try:
@@ -857,9 +1113,15 @@ def register_outreach_routes(app, database, service):
             raise ValueError('Use page >= 1 and per_page between 1 and 200')
         return page, per_page
 
+    svc.contact_outreach_paging = page_args
+
     @app.get('/api/outreach/recipients')
     @jwt_required()
     def outreach_recipients():
+        if request.args.get('contact_mode') == '1':
+            viewer = current_user()
+            if not viewer: return jsonify(error='User not found'), 404
+            return svc.contact_school_picker(viewer)
         user = current_user()
         if not user:
             return jsonify(error='User not found'), 404
@@ -939,7 +1201,10 @@ def register_outreach_routes(app, database, service):
             return jsonify(error='User not found'), 404
         if not user.email_password:
             return jsonify(error='Email settings not configured', code='no_mailbox'), 400
-        payload, status, batch = queue_batch(user, options, token)
+        if data.get('contact_mode') is True:
+            payload, status, batch = svc.queue_contact_outreach(user, options, data)
+        else:
+            payload, status, batch = queue_batch(user, options, token)
         if batch is not None:
             start_worker(current_app._get_current_object(), batch.id, batch.worker_token)
         return jsonify(**payload), status
@@ -1003,21 +1268,39 @@ def register_outreach_routes(app, database, service):
         user = current_user()
         if not user:
             return jsonify(error='User not found'), 404
-        batch = accessible_batch(user, batch_id, lock=True)
+        db.session.query(svc.User.id).filter_by(id=user.id).with_for_update().first()
+        batch = accessible_batch(user, batch_id)
         if not batch:
             return jsonify(error='Batch not found'), 404
+        if batch.user_id != user.id:
+            return jsonify(error='Only the original sender can approve a resend'), 403
+        # Match queue/feedback lock order: sender, schools, contacts, then batch.
+        ids = db.session.execute(select(OutreachRecipient.school_id, OutreachRecipient.contact_id).where(
+            OutreachRecipient.batch_id == batch_id)).all()
+        db.session.query(svc.SalesSchool.id).filter(svc.SalesSchool.id.in_([r.school_id for r in ids if r.school_id])).order_by(svc.SalesSchool.id).with_for_update().all()
+        db.session.query(svc.Contact.id).filter(svc.Contact.id.in_([r.contact_id for r in ids if r.contact_id])).order_by(svc.Contact.id).with_for_update().all()
+        db.session.expire_all()
+        batch = accessible_batch(user, batch_id, lock=True)
         state = effective_status(batch)
         if state in ('queued', 'sending'):
             return jsonify(error='This batch is still sending'), 409
         stalled = state == 'stalled'
         body = request.get_json(silent=True)
+        if body is not None and not isinstance(body, dict): return jsonify(error='Supply a retry object'), 400
         include_unconfirmed = isinstance(body, dict) and body.get('include_unconfirmed') is True
         if stalled:
             mark_stalled_unconfirmed(batch.id)
-        retryable = ['failed'] + (['queued'] if stalled else []) + (['unconfirmed'] if include_unconfirmed else [])
-        candidates = db.session.query(OutreachRecipient).filter(
-            OutreachRecipient.batch_id == batch.id, OutreachRecipient.status.in_(retryable)
-        ).order_by(OutreachRecipient.position, OutreachRecipient.id).all()
+        candidates = retry_candidates(batch, include_unconfirmed)
+        if not candidates:
+            db.session.commit()
+            return jsonify(error='Nothing to retry', code='nothing_to_retry'), 409
+        try:
+            review = svc.outreach_review_signer().loads((body or {}).get('preview_token', ''), max_age=900)
+            expected = dict(uid=user.id, retry=batch.id, include_unconfirmed=include_unconfirmed, hash=retry_digest(batch, candidates))
+            if review != expected: raise ValueError('Changed')
+        except (BadSignature, ValueError, TypeError):
+            db.session.rollback()
+            return jsonify(error='Review the remaining messages before retrying'), 409
         if not candidates:
             if stalled:
                 batch.status, batch.finished_at = 'done', now()
@@ -1026,6 +1309,13 @@ def register_outreach_routes(app, database, service):
         owner = db.session.get(svc.User, batch.user_id)
         if not owner or not owner.email_password:
             return jsonify(error='Email settings not configured', code='no_mailbox'), 400
+        contacts = [row.contact_id for row in candidates if row.contact_id]
+        db.session.query(svc.Contact.id).filter(svc.Contact.id.in_(contacts)).order_by(svc.Contact.id).with_for_update().all()
+        if OutreachRecipient.query.filter(OutreachRecipient.email.in_([row.email for row in candidates]),
+                OutreachRecipient.batch_id != batch.id, OutreachRecipient.status.in_(('queued', 'sending'))).first():
+            return jsonify(error='A contact is already sending in another batch. Review after it finishes.'), 409
+        if (batch.kind == 'followup' or batch.paused_reason) and not svc.mail_sync_status(user.id)['ready']:
+            return jsonify(error='Check replies before approving follow-ups'), 409
         limits = limits_for(owner)
         if limits['remaining'] <= 0:
             return jsonify(error='Daily sending limit reached', code='daily_limit', **limits), 429
@@ -1037,8 +1327,30 @@ def register_outreach_routes(app, database, service):
                 item.status, item.error = 'skipped', 'daily_limit'
         for item in accepted:
             item.status, item.error = 'queued', None
-        batch.status, batch.finished_at = 'queued', None
+        batch.status, batch.finished_at, batch.paused_reason = 'queued', None, None
         batch.worker_token, batch.heartbeat_at = str(uuid.uuid4()), now()
         db.session.commit()
         start_worker(current_app._get_current_object(), batch.id, batch.worker_token)
         return jsonify(batch_id=batch.id, status='queued', requeued=len(accepted), not_retried=not_retried), 202
+
+    @app.post('/api/outreach/batches/<int:batch_id>/retry-preview')
+    @jwt_required()
+    def outreach_retry_preview(batch_id):
+        user = current_user()
+        batch = accessible_batch(user, batch_id) if user else None
+        if not batch: return jsonify(error='Batch not found'), 404
+        if batch.user_id != user.id: return jsonify(error='Only the original sender can approve a resend'), 403
+        body = request.get_json(silent=True) or {}
+        if not isinstance(body, dict): return jsonify(error='Supply a review object'), 400
+        include = body.get('include_unconfirmed') is True
+        if effective_status(batch) in ('queued', 'sending'):
+            return jsonify(error='This batch is still sending'), 409
+        if effective_status(batch) == 'stalled':
+            mark_stalled_unconfirmed(batch.id)
+            db.session.commit()
+        rows = retry_candidates(batch, include)
+        token = svc.outreach_review_signer().dumps(dict(uid=user.id, retry=batch.id,
+            include_unconfirmed=include, hash=retry_digest(batch, rows)))
+        return jsonify(preview_token=token, previews=[dict(id=row.id, school_id=row.school_id,
+            school_name=row.school_name, email=row.email, subject=row.subject, body_text=row.body,
+            status=row.status, attachments=json.loads(row.attachments or '[]')) for row in rows])

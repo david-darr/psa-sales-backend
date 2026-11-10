@@ -1,0 +1,1838 @@
+[
+  {
+    "name": "psa_directory",
+    "description": "Search the school directory before creating leads. Does not send email. Requires read.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "q": {
+          "type": "string",
+          "maxLength": 20000
+        },
+        "type": {
+          "type": "string",
+          "maxLength": 20000
+        },
+        "county": {
+          "type": "string",
+          "maxLength": 20000
+        },
+        "page": {
+          "type": "string",
+          "maxLength": 20000
+        },
+        "limit": {
+          "type": "string",
+          "maxLength": 20000
+        }
+      },
+      "required": [],
+      "additionalProperties": false
+    },
+    "annotations": {
+      "readOnlyHint": true,
+      "destructiveHint": false,
+      "openWorldHint": false
+    },
+    "method": "POST",
+    "path": "/operations/psa_directory"
+  },
+  {
+    "name": "psa_profile",
+    "description": "Read your name, phone and mailbox connection status. Never returns mail credentials. Requires read.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {},
+      "required": [],
+      "additionalProperties": false
+    },
+    "annotations": {
+      "readOnlyHint": true,
+      "destructiveHint": false,
+      "openWorldHint": false
+    },
+    "method": "POST",
+    "path": "/operations/psa_profile"
+  },
+  {
+    "name": "psa_edit_profile",
+    "description": "Update only the connected employee name or phone. Account credentials remain private. Requires write.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string",
+          "maxLength": 20000
+        },
+        "phone": {
+          "type": "string",
+          "maxLength": 20000
+        }
+      },
+      "required": [],
+      "additionalProperties": false
+    },
+    "annotations": {
+      "readOnlyHint": false,
+      "destructiveHint": false,
+      "openWorldHint": false
+    },
+    "method": "POST",
+    "path": "/operations/psa_edit_profile"
+  },
+  {
+    "name": "psa_bulk_school_stage",
+    "description": "Change the stage of up to 100 accessible schools atomically. Review names and current stages first. Requires write.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "ids": {
+          "type": "array",
+          "items": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "minItems": 1,
+          "maxItems": 100
+        },
+        "status": {
+          "enum": [
+            "pending",
+            "contacted",
+            "replied",
+            "meeting",
+            "partner",
+            "former",
+            "not_interested"
+          ]
+        }
+      },
+      "required": [
+        "ids",
+        "status"
+      ],
+      "additionalProperties": false
+    },
+    "annotations": {
+      "readOnlyHint": false,
+      "destructiveHint": false,
+      "openWorldHint": false
+    },
+    "method": "POST",
+    "path": "/operations/psa_bulk_school_stage"
+  },
+  {
+    "name": "psa_create_school",
+    "description": "Add a school with duplicate protection. Use contact import for multi-contact lists. Requires write.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "school_name": {
+          "type": "string",
+          "maxLength": 20000
+        },
+        "email": {
+          "type": "string",
+          "maxLength": 20000
+        },
+        "contact_name": {
+          "type": "string",
+          "maxLength": 20000
+        },
+        "phone": {
+          "type": "string",
+          "maxLength": 20000
+        },
+        "address": {
+          "type": "string",
+          "maxLength": 20000
+        },
+        "school_type": {
+          "type": "string",
+          "maxLength": 20000
+        },
+        "website": {
+          "type": "string",
+          "maxLength": 20000
+        },
+        "county": {
+          "type": "string",
+          "maxLength": 20000
+        },
+        "additional_emails": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "maxLength": 20000
+          },
+          "maxItems": 50
+        },
+        "shared_contact_confirmed": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "school_name",
+        "email",
+        "school_type"
+      ],
+      "additionalProperties": false
+    },
+    "annotations": {
+      "readOnlyHint": false,
+      "destructiveHint": false,
+      "openWorldHint": false
+    },
+    "method": "POST",
+    "path": "/operations/psa_create_school"
+  },
+  {
+    "name": "psa_edit_school",
+    "description": "Edit school details, stage, county, notes or next action using normal school access rules. Requires write.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "school_name": {
+          "type": "string",
+          "maxLength": 20000
+        },
+        "email": {
+          "type": "string",
+          "maxLength": 20000
+        },
+        "contact_name": {
+          "type": "string",
+          "maxLength": 20000
+        },
+        "phone": {
+          "type": "string",
+          "maxLength": 20000
+        },
+        "address": {
+          "type": "string",
+          "maxLength": 20000
+        },
+        "school_type": {
+          "type": "string",
+          "maxLength": 20000
+        },
+        "website": {
+          "type": "string",
+          "maxLength": 20000
+        },
+        "county": {
+          "type": "string",
+          "maxLength": 20000
+        },
+        "status": {
+          "type": "string",
+          "maxLength": 20000
+        },
+        "notes": {
+          "type": "string",
+          "maxLength": 20000
+        },
+        "next_action": {
+          "type": "string",
+          "maxLength": 20000
+        },
+        "next_action_at": {
+          "type": "string",
+          "maxLength": 20000
+        },
+        "school_id": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "user_id": {
+          "anyOf": [
+            {
+              "type": "integer",
+              "minimum": 1
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "additional_emails": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "maxLength": 20000
+          },
+          "maxItems": 50
+        }
+      },
+      "required": [
+        "school_id"
+      ],
+      "additionalProperties": false
+    },
+    "annotations": {
+      "readOnlyHint": false,
+      "destructiveHint": false,
+      "openWorldHint": false
+    },
+    "method": "POST",
+    "path": "/operations/psa_edit_school"
+  },
+  {
+    "name": "psa_delete_schools",
+    "description": "Permanently delete selected owned schools. Review IDs and names first. Sent history is retained. Requires write.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "ids": {
+          "type": "array",
+          "items": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "minItems": 1,
+          "maxItems": 100
+        }
+      },
+      "required": [
+        "ids"
+      ],
+      "additionalProperties": false
+    },
+    "annotations": {
+      "readOnlyHint": false,
+      "destructiveHint": true,
+      "openWorldHint": false
+    },
+    "method": "POST",
+    "path": "/operations/psa_delete_schools"
+  },
+  {
+    "name": "psa_add_contact",
+    "description": "Add a role-based school contact. Shared mailbox suppression remains global. Requires write.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "school_id": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "email": {
+          "type": "string",
+          "maxLength": 20000
+        },
+        "name": {
+          "type": "string",
+          "maxLength": 20000
+        },
+        "roles": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "maxLength": 20000
+          },
+          "maxItems": 50
+        },
+        "tags": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "maxLength": 20000
+          },
+          "maxItems": 50
+        },
+        "is_primary": {
+          "type": "boolean"
+        },
+        "do_not_contact": {
+          "type": "boolean"
+        },
+        "suppression_reason": {
+          "type": "string",
+          "maxLength": 20000
+        }
+      },
+      "required": [
+        "school_id",
+        "email"
+      ],
+      "additionalProperties": false
+    },
+    "annotations": {
+      "readOnlyHint": false,
+      "destructiveHint": false,
+      "openWorldHint": false
+    },
+    "method": "POST",
+    "path": "/operations/psa_add_contact"
+  },
+  {
+    "name": "psa_edit_contact",
+    "description": "Edit a linked contact using current link and contact versions. Only admins may lift suppression. Requires write.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "school_id": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "link_id": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "version": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "contact_version": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "name": {
+          "type": "string",
+          "maxLength": 20000
+        },
+        "roles": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "maxLength": 20000
+          },
+          "maxItems": 50
+        },
+        "tags": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "maxLength": 20000
+          },
+          "maxItems": 50
+        },
+        "is_primary": {
+          "type": "boolean"
+        },
+        "do_not_contact": {
+          "type": "boolean"
+        },
+        "suppression_reason": {
+          "type": "string",
+          "maxLength": 20000
+        }
+      },
+      "required": [
+        "school_id",
+        "link_id",
+        "version",
+        "contact_version"
+      ],
+      "additionalProperties": false
+    },
+    "annotations": {
+      "readOnlyHint": false,
+      "destructiveHint": false,
+      "openWorldHint": false
+    },
+    "method": "POST",
+    "path": "/operations/psa_edit_contact"
+  },
+  {
+    "name": "psa_report_contact",
+    "description": "Record an opt-out, complaint or review signal and pause affected outreach. Explain the source. Requires write.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "contact_id": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "kind": {
+          "enum": [
+            "optout",
+            "complaint",
+            "review"
+          ]
+        },
+        "detail": {
+          "type": "string",
+          "maxLength": 20000
+        }
+      },
+      "required": [
+        "contact_id",
+        "kind",
+        "detail"
+      ],
+      "additionalProperties": false
+    },
+    "annotations": {
+      "readOnlyHint": false,
+      "destructiveHint": false,
+      "openWorldHint": false
+    },
+    "method": "POST",
+    "path": "/operations/psa_report_contact"
+  },
+  {
+    "name": "psa_assignment_preview",
+    "description": "Admin: preview moving matching schools to a rep or the unassigned pool. Never changes owners. Requires write.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "user_id": {
+          "anyOf": [
+            {
+              "type": "integer",
+              "minimum": 1
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "ids": {
+          "type": "array",
+          "items": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "minItems": 1,
+          "maxItems": 2000
+        },
+        "filters": {
+          "type": "object",
+          "properties": {
+            "q": {
+              "type": "string",
+              "maxLength": 20000
+            },
+            "stage": {
+              "type": "string",
+              "maxLength": 20000
+            },
+            "type": {
+              "type": "string",
+              "maxLength": 20000
+            },
+            "owner": {
+              "type": "string",
+              "maxLength": 20000
+            },
+            "county": {
+              "type": "string",
+              "maxLength": 20000
+            },
+            "scope": {
+              "type": "string",
+              "maxLength": 20000
+            },
+            "due": {
+              "type": "string",
+              "maxLength": 20000
+            }
+          },
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "user_id"
+      ],
+      "additionalProperties": false
+    },
+    "annotations": {
+      "readOnlyHint": false,
+      "destructiveHint": false,
+      "openWorldHint": false
+    },
+    "method": "POST",
+    "path": "/operations/psa_assignment_preview"
+  },
+  {
+    "name": "psa_assignment_commit",
+    "description": "Admin: apply a reviewed, unexpired school assignment. Changed selections require a new preview. Requires write.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "review_id": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9_-]{1,100}$"
+        }
+      },
+      "required": [
+        "review_id"
+      ],
+      "additionalProperties": false
+    },
+    "annotations": {
+      "readOnlyHint": false,
+      "destructiveHint": false,
+      "openWorldHint": false
+    },
+    "method": "POST",
+    "path": "/operations/psa_assignment_commit"
+  },
+  {
+    "name": "psa_claim_school",
+    "description": "Claim one unassigned school for the connected employee. Competing claims return a conflict. Requires write.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "school_id": {
+          "type": "integer",
+          "minimum": 1
+        }
+      },
+      "required": [
+        "school_id"
+      ],
+      "additionalProperties": false
+    },
+    "annotations": {
+      "readOnlyHint": false,
+      "destructiveHint": false,
+      "openWorldHint": false
+    },
+    "method": "POST",
+    "path": "/operations/psa_claim_school"
+  },
+  {
+    "name": "psa_find_schools",
+    "description": "Find nearby schools using address or coordinates, keywords and radius. May call the location provider. Requires read.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "address": {
+          "type": "string",
+          "maxLength": 20000
+        },
+        "lat": {
+          "type": "number",
+          "minimum": -90,
+          "maximum": 90
+        },
+        "lng": {
+          "type": "number",
+          "minimum": -180,
+          "maximum": 180
+        },
+        "radius_km": {
+          "type": "number",
+          "minimum": 1,
+          "maximum": 40
+        },
+        "keywords": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "maxLength": 20000
+          },
+          "maxItems": 50
+        },
+        "types": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "maxLength": 20000
+          },
+          "maxItems": 50
+        },
+        "page_token": {
+          "type": "string",
+          "maxLength": 20000
+        }
+      },
+      "required": [],
+      "additionalProperties": false
+    },
+    "annotations": {
+      "readOnlyHint": true,
+      "destructiveHint": false,
+      "openWorldHint": false
+    },
+    "method": "POST",
+    "path": "/operations/psa_find_schools"
+  },
+  {
+    "name": "psa_place_details",
+    "description": "Read contact details for a discovered place ID. Requires read.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "place_id": {
+          "type": "string",
+          "maxLength": 20000
+        }
+      },
+      "required": [
+        "place_id"
+      ],
+      "additionalProperties": false
+    },
+    "annotations": {
+      "readOnlyHint": true,
+      "destructiveHint": false,
+      "openWorldHint": false
+    },
+    "method": "POST",
+    "path": "/operations/psa_place_details"
+  },
+  {
+    "name": "psa_save_discovered_schools",
+    "description": "Save selected discovered schools with duplicate checks. Reps can assign only to themselves. Requires write.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "schools": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 50,
+          "items": {
+            "type": "object",
+            "properties": {
+              "place_id": {
+                "type": "string",
+                "maxLength": 20000
+              },
+              "school_name": {
+                "type": "string",
+                "maxLength": 20000
+              },
+              "address": {
+                "type": "string",
+                "maxLength": 20000
+              },
+              "email": {
+                "type": "string",
+                "maxLength": 20000
+              },
+              "phone": {
+                "type": "string",
+                "maxLength": 20000
+              },
+              "website": {
+                "type": "string",
+                "maxLength": 20000
+              },
+              "school_type": {
+                "type": "string",
+                "maxLength": 20000
+              },
+              "lat": {
+                "type": "number"
+              },
+              "lng": {
+                "type": "number"
+              }
+            },
+            "required": [
+              "place_id",
+              "school_name"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "assign_to": {
+          "type": "integer",
+          "minimum": 1
+        }
+      },
+      "required": [
+        "schools"
+      ],
+      "additionalProperties": false
+    },
+    "annotations": {
+      "readOnlyHint": false,
+      "destructiveHint": false,
+      "openWorldHint": false
+    },
+    "method": "POST",
+    "path": "/operations/psa_save_discovered_schools"
+  },
+  {
+    "name": "psa_map_accounts",
+    "description": "Read owned school coordinates, stages and rep colors for territory planning. Requires read.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "owner": {
+          "type": "string",
+          "maxLength": 20000
+        },
+        "stages": {
+          "type": "string",
+          "maxLength": 20000
+        },
+        "q": {
+          "type": "string",
+          "maxLength": 20000
+        },
+        "county": {
+          "type": "string",
+          "maxLength": 20000
+        },
+        "scope": {
+          "type": "string",
+          "maxLength": 20000
+        }
+      },
+      "required": [],
+      "additionalProperties": false
+    },
+    "annotations": {
+      "readOnlyHint": true,
+      "destructiveHint": false,
+      "openWorldHint": false
+    },
+    "method": "POST",
+    "path": "/operations/psa_map_accounts"
+  },
+  {
+    "name": "psa_locate_schools",
+    "description": "Resolve missing coordinates in a bounded pass using the existing location cache. Requires write.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "limit": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 50
+        }
+      },
+      "required": [],
+      "additionalProperties": false
+    },
+    "annotations": {
+      "readOnlyHint": false,
+      "destructiveHint": false,
+      "openWorldHint": false
+    },
+    "method": "POST",
+    "path": "/operations/psa_locate_schools"
+  },
+  {
+    "name": "psa_map_layers",
+    "description": "Read saved PSA, partner and elementary prospect map layers. Requires read.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {},
+      "required": [],
+      "additionalProperties": false
+    },
+    "annotations": {
+      "readOnlyHint": true,
+      "destructiveHint": false,
+      "openWorldHint": false
+    },
+    "method": "POST",
+    "path": "/operations/psa_map_layers"
+  },
+  {
+    "name": "psa_refresh_map_layers",
+    "description": "Admin: refresh saved prospect map layers from their configured source. Requires write.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {},
+      "required": [],
+      "additionalProperties": false
+    },
+    "annotations": {
+      "readOnlyHint": false,
+      "destructiveHint": false,
+      "openWorldHint": false
+    },
+    "method": "POST",
+    "path": "/operations/psa_refresh_map_layers"
+  },
+  {
+    "name": "psa_plan_visits",
+    "description": "Suggest a bounded visit order from a starting address and selected coordinates. Not driving directions. Requires read.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "start_address": {
+          "type": "string",
+          "maxLength": 20000
+        },
+        "schools": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 25,
+          "items": {
+            "type": "object",
+            "properties": {
+              "place_id": {
+                "type": "string",
+                "maxLength": 20000
+              },
+              "name": {
+                "type": "string",
+                "maxLength": 20000
+              },
+              "school_name": {
+                "type": "string",
+                "maxLength": 20000
+              },
+              "lat": {
+                "type": "number"
+              },
+              "lng": {
+                "type": "number"
+              }
+            },
+            "required": [
+              "place_id",
+              "lat",
+              "lng"
+            ],
+            "additionalProperties": false
+          }
+        }
+      },
+      "required": [
+        "start_address",
+        "schools"
+      ],
+      "additionalProperties": false
+    },
+    "annotations": {
+      "readOnlyHint": true,
+      "destructiveHint": false,
+      "openWorldHint": false
+    },
+    "method": "POST",
+    "path": "/operations/psa_plan_visits"
+  },
+  {
+    "name": "psa_template_versions",
+    "description": "Read saved text and PDF revision history for a shared template. Requires outreach:read.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "template_id": {
+          "type": "integer",
+          "minimum": 1
+        }
+      },
+      "required": [
+        "template_id"
+      ],
+      "additionalProperties": false
+    },
+    "annotations": {
+      "readOnlyHint": true,
+      "destructiveHint": false,
+      "openWorldHint": false
+    },
+    "method": "POST",
+    "path": "/operations/psa_template_versions"
+  },
+  {
+    "name": "psa_create_template",
+    "description": "Admin: create a shared email template with reusable catalog PDF IDs. Does not send mail. Requires library:manage.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string",
+          "maxLength": 20000
+        },
+        "kind": {
+          "enum": [
+            "initial",
+            "followup"
+          ]
+        },
+        "audience": {
+          "type": "string",
+          "maxLength": 20000
+        },
+        "step": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 3
+        },
+        "subject": {
+          "type": "string",
+          "maxLength": 20000
+        },
+        "body": {
+          "type": "string",
+          "maxLength": 20000
+        },
+        "attachment_ids": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "maxLength": 20000
+          },
+          "maxItems": 3
+        }
+      },
+      "required": [
+        "name",
+        "kind",
+        "audience",
+        "subject",
+        "body"
+      ],
+      "additionalProperties": false
+    },
+    "annotations": {
+      "readOnlyHint": false,
+      "destructiveHint": false,
+      "openWorldHint": false
+    },
+    "method": "POST",
+    "path": "/operations/psa_create_template"
+  },
+  {
+    "name": "psa_edit_template",
+    "description": "Admin: edit or archive a shared template with its current revision; queued copy stays frozen. Requires library:manage.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "template_id": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "revision": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "archived": {
+          "type": "boolean"
+        },
+        "name": {
+          "type": "string",
+          "maxLength": 20000
+        },
+        "kind": {
+          "enum": [
+            "initial",
+            "followup"
+          ]
+        },
+        "audience": {
+          "type": "string",
+          "maxLength": 20000
+        },
+        "step": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 3
+        },
+        "subject": {
+          "type": "string",
+          "maxLength": 20000
+        },
+        "body": {
+          "type": "string",
+          "maxLength": 20000
+        },
+        "attachment_ids": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "maxLength": 20000
+          },
+          "maxItems": 3
+        }
+      },
+      "required": [
+        "template_id",
+        "revision"
+      ],
+      "additionalProperties": false
+    },
+    "annotations": {
+      "readOnlyHint": false,
+      "destructiveHint": false,
+      "openWorldHint": false
+    },
+    "method": "POST",
+    "path": "/operations/psa_edit_template"
+  },
+  {
+    "name": "psa_seed_templates",
+    "description": "Admin: add missing Winter 2027 templates without replacing later edits. Requires library:manage.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {},
+      "required": [],
+      "additionalProperties": false
+    },
+    "annotations": {
+      "readOnlyHint": false,
+      "destructiveHint": false,
+      "openWorldHint": false
+    },
+    "method": "POST",
+    "path": "/operations/psa_seed_templates"
+  },
+  {
+    "name": "psa_publish_pdf",
+    "description": "Admin: copy an approved built-in PSA PDF into the reusable catalog. Requires library:manage.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "filename": {
+          "type": "string",
+          "maxLength": 20000
+        }
+      },
+      "required": [
+        "filename"
+      ],
+      "additionalProperties": false
+    },
+    "annotations": {
+      "readOnlyHint": false,
+      "destructiveHint": false,
+      "openWorldHint": false
+    },
+    "method": "POST",
+    "path": "/operations/psa_publish_pdf"
+  },
+  {
+    "name": "psa_upload_pdf",
+    "description": "Admin: upload a chosen PDF to the reusable catalog. Supply filename and base64 bytes; maximum 10 MB decoded. Never sends mail. Requires library:manage.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "filename": {
+          "type": "string",
+          "maxLength": 150
+        },
+        "encoded": {
+          "type": "string",
+          "maxLength": 13981016
+        }
+      },
+      "required": [
+        "filename",
+        "encoded"
+      ],
+      "additionalProperties": false
+    },
+    "annotations": {
+      "readOnlyHint": false,
+      "destructiveHint": false,
+      "openWorldHint": false
+    },
+    "method": "POST",
+    "path": "/operations/psa_upload_pdf"
+  },
+  {
+    "name": "psa_upload_templates",
+    "description": "Admin: upload template JSON for a review preview. Review then commit; existing edits are preserved. Requires library:manage.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "filename": {
+          "type": "string",
+          "maxLength": 150
+        },
+        "encoded": {
+          "type": "string",
+          "maxLength": 1398104
+        }
+      },
+      "required": [
+        "filename",
+        "encoded"
+      ],
+      "additionalProperties": false
+    },
+    "annotations": {
+      "readOnlyHint": false,
+      "destructiveHint": false,
+      "openWorldHint": false
+    },
+    "method": "POST",
+    "path": "/operations/psa_upload_templates"
+  },
+  {
+    "name": "psa_commit_template_import",
+    "description": "Admin: commit a reviewed template JSON import by its returned review ID. Stale reviews are rejected. Requires library:manage.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "review_id": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9_-]{1,100}$"
+        }
+      },
+      "required": [
+        "review_id"
+      ],
+      "additionalProperties": false
+    },
+    "annotations": {
+      "readOnlyHint": false,
+      "destructiveHint": false,
+      "openWorldHint": false
+    },
+    "method": "POST",
+    "path": "/operations/psa_commit_template_import"
+  },
+  {
+    "name": "psa_create_sequence",
+    "description": "Admin: create a versioned follow-up definition; does not enroll or send to contacts. Requires library:manage.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string",
+          "maxLength": 20000
+        },
+        "audience": {
+          "type": "string",
+          "maxLength": 20000
+        },
+        "start_hour": {
+          "type": "integer",
+          "minimum": 6,
+          "maximum": 19
+        },
+        "end_hour": {
+          "type": "integer",
+          "minimum": 7,
+          "maximum": 20
+        },
+        "steps": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 3,
+          "items": {
+            "type": "object",
+            "properties": {
+              "day": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 90
+              },
+              "template_id": {
+                "type": "integer",
+                "minimum": 1
+              },
+              "template_revision": {
+                "type": "integer",
+                "minimum": 1
+              }
+            },
+            "required": [
+              "day",
+              "template_id",
+              "template_revision"
+            ],
+            "additionalProperties": false
+          }
+        }
+      },
+      "required": [
+        "name",
+        "steps"
+      ],
+      "additionalProperties": false
+    },
+    "annotations": {
+      "readOnlyHint": false,
+      "destructiveHint": false,
+      "openWorldHint": false
+    },
+    "method": "POST",
+    "path": "/operations/psa_create_sequence"
+  },
+  {
+    "name": "psa_edit_sequence",
+    "description": "Admin: edit or archive a follow-up definition using its revision. Changes stop existing enrollments so they need a new review. Requires library:manage.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "sequence_id": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "revision": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "archived": {
+          "type": "boolean"
+        },
+        "name": {
+          "type": "string",
+          "maxLength": 20000
+        },
+        "audience": {
+          "type": "string",
+          "maxLength": 20000
+        },
+        "start_hour": {
+          "type": "integer",
+          "minimum": 6,
+          "maximum": 19
+        },
+        "end_hour": {
+          "type": "integer",
+          "minimum": 7,
+          "maximum": 20
+        },
+        "steps": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 3,
+          "items": {
+            "type": "object",
+            "properties": {
+              "day": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 90
+              },
+              "template_id": {
+                "type": "integer",
+                "minimum": 1
+              },
+              "template_revision": {
+                "type": "integer",
+                "minimum": 1
+              }
+            },
+            "required": [
+              "day",
+              "template_id",
+              "template_revision"
+            ],
+            "additionalProperties": false
+          }
+        }
+      },
+      "required": [
+        "sequence_id",
+        "revision"
+      ],
+      "additionalProperties": false
+    },
+    "annotations": {
+      "readOnlyHint": false,
+      "destructiveHint": false,
+      "openWorldHint": false
+    },
+    "method": "POST",
+    "path": "/operations/psa_edit_sequence"
+  },
+  {
+    "name": "psa_sequence_versions",
+    "description": "Read follow-up definition revisions. Requires outreach:read.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "sequence_id": {
+          "type": "integer",
+          "minimum": 1
+        }
+      },
+      "required": [
+        "sequence_id"
+      ],
+      "additionalProperties": false
+    },
+    "annotations": {
+      "readOnlyHint": true,
+      "destructiveHint": false,
+      "openWorldHint": false
+    },
+    "method": "POST",
+    "path": "/operations/psa_sequence_versions"
+  },
+  {
+    "name": "psa_sequence_originals",
+    "description": "Read eligible original messages before preparing a follow-up plan. No enrollment or sending. Requires outreach:read.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "q": {
+          "type": "string",
+          "maxLength": 20000
+        },
+        "page": {
+          "type": "string",
+          "maxLength": 20000
+        },
+        "per_page": {
+          "type": "string",
+          "maxLength": 20000
+        }
+      },
+      "required": [],
+      "additionalProperties": false
+    },
+    "annotations": {
+      "readOnlyHint": true,
+      "destructiveHint": false,
+      "openWorldHint": false
+    },
+    "method": "POST",
+    "path": "/operations/psa_sequence_originals"
+  },
+  {
+    "name": "psa_mail_limits",
+    "description": "Read the connected employee daily sending allowance. Requires outreach:read.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {},
+      "required": [],
+      "additionalProperties": false
+    },
+    "annotations": {
+      "readOnlyHint": true,
+      "destructiveHint": false,
+      "openWorldHint": false
+    },
+    "method": "POST",
+    "path": "/operations/psa_mail_limits"
+  },
+  {
+    "name": "psa_outreach_campaigns",
+    "description": "Read outreach campaign IDs and their current daily caps. Does not authorize sending. Requires outreach:read.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {},
+      "required": [],
+      "additionalProperties": false
+    },
+    "annotations": {
+      "readOnlyHint": true,
+      "destructiveHint": false,
+      "openWorldHint": false
+    },
+    "method": "POST",
+    "path": "/operations/psa_outreach_campaigns"
+  },
+  {
+    "name": "psa_create_outreach_campaign",
+    "description": "Admin: create a distinct outreach campaign label and cap with a reason. Does not approve recipients or start sending. Requires library:manage.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string",
+          "maxLength": 20000
+        },
+        "reason": {
+          "type": "string",
+          "maxLength": 20000
+        },
+        "daily_limit": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 1000
+        }
+      },
+      "required": [
+        "name",
+        "reason",
+        "daily_limit"
+      ],
+      "additionalProperties": false
+    },
+    "annotations": {
+      "readOnlyHint": false,
+      "destructiveHint": false,
+      "openWorldHint": false
+    },
+    "method": "POST",
+    "path": "/operations/psa_create_outreach_campaign"
+  },
+  {
+    "name": "psa_worker_status",
+    "description": "Read sending worker freshness and queue status. Requires outreach:read.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {},
+      "required": [],
+      "additionalProperties": false
+    },
+    "annotations": {
+      "readOnlyHint": true,
+      "destructiveHint": false,
+      "openWorldHint": false
+    },
+    "method": "POST",
+    "path": "/operations/psa_worker_status"
+  },
+  {
+    "name": "psa_program_commissions",
+    "description": "Admin: read seasonal commission records and rep/season totals. Requires read.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "season": {
+          "type": "string",
+          "maxLength": 20000
+        },
+        "rep_id": {
+          "type": "integer",
+          "minimum": 1
+        }
+      },
+      "required": [],
+      "additionalProperties": false
+    },
+    "annotations": {
+      "readOnlyHint": true,
+      "destructiveHint": false,
+      "openWorldHint": false
+    },
+    "method": "POST",
+    "path": "/operations/psa_program_commissions"
+  },
+  {
+    "name": "psa_create_commission",
+    "description": "Admin: record one school/program/season commission with explicit rep payout. Requires commissions:manage.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "season": {
+          "type": "string",
+          "maxLength": 20000
+        },
+        "program": {
+          "type": "string",
+          "maxLength": 20000
+        },
+        "sale_type": {
+          "type": "string",
+          "maxLength": 20000
+        },
+        "gross": {
+          "type": "string",
+          "maxLength": 20000
+        },
+        "cash_expenses": {
+          "type": "string",
+          "maxLength": 20000
+        },
+        "notes": {
+          "type": "string",
+          "maxLength": 20000
+        },
+        "sales_school_id": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "rep_id": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "leagueapps": {
+          "type": "boolean"
+        },
+        "rep_payout": {
+          "anyOf": [
+            {
+              "type": "string",
+              "maxLength": 20000
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "voided": {
+          "type": "boolean"
+        },
+        "revision": {
+          "type": "integer",
+          "minimum": 1
+        }
+      },
+      "required": [
+        "sales_school_id",
+        "season",
+        "program",
+        "rep_id",
+        "sale_type",
+        "gross",
+        "leagueapps",
+        "cash_expenses"
+      ],
+      "additionalProperties": false
+    },
+    "annotations": {
+      "readOnlyHint": false,
+      "destructiveHint": false,
+      "openWorldHint": false
+    },
+    "method": "POST",
+    "path": "/operations/psa_create_commission"
+  },
+  {
+    "name": "psa_edit_commission",
+    "description": "Admin: correct or void a commission using the current revision; history is preserved. Requires commissions:manage.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "record_id": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "season": {
+          "type": "string",
+          "maxLength": 20000
+        },
+        "program": {
+          "type": "string",
+          "maxLength": 20000
+        },
+        "sale_type": {
+          "type": "string",
+          "maxLength": 20000
+        },
+        "gross": {
+          "type": "string",
+          "maxLength": 20000
+        },
+        "cash_expenses": {
+          "type": "string",
+          "maxLength": 20000
+        },
+        "notes": {
+          "type": "string",
+          "maxLength": 20000
+        },
+        "sales_school_id": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "rep_id": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "leagueapps": {
+          "type": "boolean"
+        },
+        "rep_payout": {
+          "anyOf": [
+            {
+              "type": "string",
+              "maxLength": 20000
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "voided": {
+          "type": "boolean"
+        },
+        "revision": {
+          "type": "integer",
+          "minimum": 1
+        }
+      },
+      "required": [
+        "record_id",
+        "revision",
+        "sales_school_id",
+        "season",
+        "program",
+        "rep_id",
+        "sale_type",
+        "gross",
+        "leagueapps",
+        "cash_expenses"
+      ],
+      "additionalProperties": false
+    },
+    "annotations": {
+      "readOnlyHint": false,
+      "destructiveHint": false,
+      "openWorldHint": false
+    },
+    "method": "POST",
+    "path": "/operations/psa_edit_commission"
+  },
+  {
+    "name": "psa_commission_history",
+    "description": "Admin: read correction history for a seasonal commission. Requires read.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "record_id": {
+          "type": "integer",
+          "minimum": 1
+        }
+      },
+      "required": [
+        "record_id"
+      ],
+      "additionalProperties": false
+    },
+    "annotations": {
+      "readOnlyHint": true,
+      "destructiveHint": false,
+      "openWorldHint": false
+    },
+    "method": "POST",
+    "path": "/operations/psa_commission_history"
+  },
+  {
+    "name": "psa_set_team_access",
+    "description": "Admin: change a teammate admin role; normal self/last-admin protections remain. Requires team:manage.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "member_id": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "admin": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "member_id",
+        "admin"
+      ],
+      "additionalProperties": false
+    },
+    "annotations": {
+      "readOnlyHint": false,
+      "destructiveHint": false,
+      "openWorldHint": false
+    },
+    "method": "POST",
+    "path": "/operations/psa_set_team_access"
+  },
+  {
+    "name": "psa_join_links",
+    "description": "Admin: list employee join-link metadata. Requires read.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {},
+      "required": [],
+      "additionalProperties": false
+    },
+    "annotations": {
+      "readOnlyHint": true,
+      "destructiveHint": false,
+      "openWorldHint": false
+    },
+    "method": "POST",
+    "path": "/operations/psa_join_links"
+  },
+  {
+    "name": "psa_create_join_link",
+    "description": "Admin: create an employee join link with explicit expiry and use limit. Treat the returned invite token as private. Requires team:manage.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "days": {
+          "enum": [
+            1,
+            7,
+            14,
+            30
+          ]
+        },
+        "max_uses": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 200
+        },
+        "label": {
+          "type": "string",
+          "maxLength": 20000
+        }
+      },
+      "required": [
+        "days",
+        "max_uses"
+      ],
+      "additionalProperties": false
+    },
+    "annotations": {
+      "readOnlyHint": false,
+      "destructiveHint": false,
+      "openWorldHint": false
+    },
+    "method": "POST",
+    "path": "/operations/psa_create_join_link"
+  },
+  {
+    "name": "psa_revoke_join_link",
+    "description": "Admin: revoke one employee join link. Requires team:manage.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "link_id": {
+          "type": "integer",
+          "minimum": 1
+        }
+      },
+      "required": [
+        "link_id"
+      ],
+      "additionalProperties": false
+    },
+    "annotations": {
+      "readOnlyHint": false,
+      "destructiveHint": true,
+      "openWorldHint": false
+    },
+    "method": "POST",
+    "path": "/operations/psa_revoke_join_link"
+  },
+  {
+    "name": "psa_capabilities",
+    "description": "Check operation availability, delegated permissions and human-only controls for this connection.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {},
+      "required": [],
+      "additionalProperties": false
+    },
+    "annotations": {
+      "readOnlyHint": true,
+      "destructiveHint": false,
+      "openWorldHint": false
+    },
+    "method": "GET",
+    "path": "/capabilities"
+  },
+  {
+    "name": "psa_prepare_reply",
+    "description": "Prepare a threaded reply for private human review. Requires outreach:prepare. Never approves or sends; execute the approved draft with psa_execute_approved_outreach.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "email_id": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "subject": {
+          "type": "string",
+          "maxLength": 20000
+        },
+        "message": {
+          "type": "string",
+          "maxLength": 20000
+        }
+      },
+      "required": [
+        "email_id",
+        "subject",
+        "message"
+      ],
+      "additionalProperties": false
+    },
+    "annotations": {
+      "readOnlyHint": false,
+      "destructiveHint": false,
+      "openWorldHint": false
+    },
+    "method": "POST",
+    "path": "/outreach/reply-drafts"
+  }
+]

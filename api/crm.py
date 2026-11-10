@@ -36,8 +36,8 @@ def followup_due_filter(model, current):
     from .api import FOLLOWUP_SCHEDULE_DAYS
     count = case((and_(model.followup_sent.is_(True), func.coalesce(model.followup_count, 0) < 1), 1),
                  else_=func.coalesce(model.followup_count, 0))
-    return or_(*[and_(count == stage, model.sent_at <= current - timedelta(days=days))
-                 for stage, days in enumerate(FOLLOWUP_SCHEDULE_DAYS)])
+    return and_(model.sequence_managed.isnot(True), or_(*[and_(count == stage, model.sent_at <= current - timedelta(days=days))
+                 for stage, days in enumerate(FOLLOWUP_SCHEDULE_DAYS)]))
 
 
 def register_crm_routes(app, db, User, School, SentEmail, Task, Activity, serialize_school, Directory):
@@ -59,32 +59,45 @@ def register_crm_routes(app, db, User, School, SentEmail, Task, Activity, serial
             raise ValueError('Use a positive page and a limit between 1 and 100')
         return page, limit
 
-    def school_query(user):
-        query = scoped(School.query, School, user)
-        stage = request.args.get('stage')
+    def school_query(user, args=None):
+        args = request.args if args is None else args
+        scope = args.get('scope')
+        if scope not in (None, '', 'mine', 'team', 'unassigned'):
+            raise ValueError('Invalid school scope')
+        query = School.query
+        if scope == 'unassigned':
+            query = query.filter(School.user_id.is_(None))
+        elif not user.admin or scope == 'mine':
+            query = query.filter(School.user_id == user.id)
+        stage = args.get('stage')
         if stage:
             wanted = [item.strip() for item in stage.split(',') if item.strip()]
             if not wanted or any(item not in STAGES for item in wanted):
                 raise ValueError('Invalid school stage')
             query = query.filter(School.status.in_(wanted))
-        owner = request.args.get('owner')
+        owner = args.get('owner')
         if owner:
             try:
-                query = query.filter(School.user_id == int(owner))
+                query = query.filter(School.user_id.is_(None)) if owner == 'unassigned' else query.filter(School.user_id == int(owner))
             except ValueError:
                 raise ValueError('Invalid owner')
-        kind = request.args.get('type')
+        county = args.get('county', '').strip()
+        if len(county) > 80:
+            raise ValueError('County must have at most 80 characters')
+        if county:
+            query = query.filter(func.lower(func.trim(School.county)) == county.casefold())
+        kind = args.get('type')
         if kind:
             if kind not in ('preschool', 'elementary', 'private'):
                 raise ValueError('Invalid school type')
             query = query.filter(School.school_type == kind)
-        term = request.args.get('q', '').strip().lower()[:120]
+        term = args.get('q', '').strip().lower()[:120]
         if term:
             query = query.filter(or_(*[
                 func.lower(field).contains(term, autoescape=True)
                 for field in (School.school_name, School.contact_name, School.email, School.address)
             ]))
-        due = request.args.get('due')
+        due = args.get('due')
         today = calendar_today()
         if due == 'overdue':
             query = query.filter(School.next_action_at < today, School.next_action.isnot(None), School.next_action != '')
@@ -198,30 +211,26 @@ def register_crm_routes(app, db, User, School, SentEmail, Task, Activity, serial
         if 'user_id' in data:
             if not user.admin:
                 return jsonify(error='Only administrators can reassign schools'), 403
-            if type(data['user_id']) is not int:
+            if data['user_id'] is not None and type(data['user_id']) is not int:
                 return jsonify(error='Invalid employee'), 400
-            owner = db.session.get(User, data['user_id'])
-            if not owner:
+            owner = db.session.get(User, data['user_id']) if data['user_id'] is not None else None
+            if data['user_id'] is not None and not owner:
                 return jsonify(error='Employee not found'), 400
         rows = School.query.filter(School.id.in_(set(ids))).order_by(School.id).with_for_update().all()
         # Reject the entire operation if even one record is absent or inaccessible.
         if len(rows) != len(set(ids)) or any(not user.admin and row.user_id != user.id for row in rows):
             return jsonify(error='One or more schools are unavailable'), 404
-        changed = 0
+        changed_ids = set()
         for row in rows:
-            changes = []
             if 'status' in data and row.status != data['status']:
                 set_school_status(row, data['status'], user.id)
-                changes.append('stage to ' + data['status'].replace('_', ' '))
-            if owner and row.user_id != owner.id:
-                row.user_id = owner.id
-                Task.query.filter_by(school_id=row.id, status='open').update(
-                    {Task.user_id: owner.id, Task.version: Task.version + 1}, synchronize_session=False)
-                changes.append('owner to ' + owner.name)
-            if changes:
-                db.session.add(Activity(sales_school_id=row.id, actor_id=user.id, kind='updated',
-                                        detail='Updated ' + ', '.join(changes)))
-                changed += 1
+                db.session.add(Activity(sales_school_id=row.id, actor_id=user.id, kind='updated', detail='Updated stage to ' + data['status'].replace('_', ' ')))
+                changed_ids.add(row.id)
+        if 'user_id' in data:
+            from .ownership import change_owners
+            changed_ids.update(row.id for row in rows if row.user_id != data['user_id'])
+            change_owners(db, rows, data['user_id'], user, Task, Activity)
+        changed = len(changed_ids)
         db.session.commit()
         return jsonify(updated=changed)
 
@@ -461,3 +470,6 @@ def register_crm_routes(app, db, User, School, SentEmail, Task, Activity, serial
         member.admin = data['admin']
         db.session.commit()
         return jsonify(team_rows(now().replace(hour=0, minute=0, second=0, microsecond=0), member.id)[0])
+
+    from .ownership import register_ownership_routes
+    register_ownership_routes(app, db, User, School, Task, Activity, serialize_school, school_query)

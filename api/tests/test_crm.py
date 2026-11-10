@@ -75,7 +75,8 @@ class CRMTests(unittest.TestCase):
         service.db.session.refresh(task)
         self.assertEqual(task.user_id, self.other.id)
         self.assertEqual(task.version, 2)
-        self.assertEqual(service.SchoolActivity.query.one().actor_id, self.admin.id)
+        self.assertEqual({activity.actor_id for activity in service.SchoolActivity.query.all()}, {self.admin.id})
+        self.assertEqual(service.SchoolActivity.query.filter_by(kind='ownership').count(), 1)
         data = self.client.get('/api/crm/tasks', headers=self.auth(self.owner)).get_json()
         self.assertEqual(data['total'], 0)
 
@@ -146,22 +147,15 @@ class CRMTests(unittest.TestCase):
         self.assertIsNone(row['sales_school_id'])
 
     def test_outreach_review_matches_send_and_prevents_cross_owner_sends(self):
-        self.a.school_name = "Maple & Oak's Academy"
-        service.db.session.commit()
         selected = {'school_ids': [self.a.id], 'send_to_all_emails': False}
         preview = self.client.post('/api/email-preview', headers=self.auth(self.owner), json=selected)
         self.assertEqual(preview.status_code, 200)
-        self.assertIn("Maple & Oak's Academy", preview.get_json()['items'][0]['body'])
-        with patch.object(service, 'send_emails_over_connection', side_effect=lambda _a, _b, _c, jobs: [(job, False, 'simulated failure') for job in jobs]) as send:
-            self.client.post('/api/send-email', headers=self.auth(self.owner), json=selected)
-        self.assertEqual(preview.get_json()['items'][0]['body'], send.call_args.args[3][0]['body'])
-        with patch.object(service, 'send_emails_over_connection', side_effect=lambda _a, _b, _c, jobs: [(job, False, 'simulated failure') for job in jobs]) as reviewed_send:
-            result = self.client.post('/api/crm/outreach/send', headers=self.auth(self.owner),
-                json={**selected, 'preview_token': preview.get_json()['preview_token']})
-            self.assertEqual(result.status_code, 200)
-            reviewed_send.assert_called_once()
+        with patch.object(service, 'send_emails_over_connection') as send:
+            for path in ('/api/send-email', '/api/crm/outreach/send'):
+                result = self.client.post(path, headers=self.auth(self.owner), json={**selected, 'preview_token': preview.get_json()['preview_token']})
+                self.assertEqual(result.status_code, 409)
+            send.assert_not_called()
         self.assertEqual(self.client.post('/api/email-preview', headers=self.auth(self.admin), json=selected).status_code, 403)
-        self.assertEqual(self.client.post('/api/send-email', headers=self.auth(self.admin), json=selected).status_code, 403)
 
     def test_new_send_flow_rejects_stale_or_missing_review_without_smtp(self):
         selected = {'school_ids': [self.a.id], 'send_to_all_emails': False}
