@@ -176,7 +176,7 @@ def register_sequences(app, db, svc, out):
         if not original or original.responded: return 'Conversation replied or unavailable'
         if not school or school.user_id != enrollment.user_id or school.ownership_version != snap['ownership_version']: return 'School owner changed'
         if school.status in STOP_STAGES: return 'School is no longer eligible'
-        if not contact or contact.do_not_contact: return 'Contact suppressed'
+        if not contact or contact.do_not_contact or (link and link.do_not_contact): return 'Contact suppressed'
         if not link or link.school_id != school.id or link.contact_id != contact.id or link.version != snap['link_version'] or contact.version != snap['contact_version']: return 'Contact details changed'
         if original.school_email.strip().casefold() != contact.email: return 'Original recipient changed'
         cfg = snap['definition']

@@ -384,7 +384,7 @@ def register_campaign_plans(app, db, svc, out):
                 db.session.query(svc.SalesSchool.id).filter_by(id=row['school_id']).with_for_update().first()
                 db.session.query(svc.Contact.id).filter_by(id=row['contact_id']).with_for_update().first()
                 school=db.session.get(svc.SalesSchool,row['school_id']);contact=db.session.get(svc.Contact,row['contact_id']);link=db.session.get(svc.SchoolContact,row['contact_link_id'])
-                changed=not school or school.user_id!=uid or school.ownership_version!=row['signature']['owner_version'] or not contact or contact.do_not_contact or contact.version!=row['signature']['contact_version'] or not link or link.version!=row['signature']['link_version']
+                changed=not school or school.user_id!=uid or school.ownership_version!=row['signature']['owner_version'] or not contact or contact.do_not_contact or contact.version!=row['signature']['contact_version'] or not link or link.do_not_contact or link.version!=row['signature']['link_version']
                 if changed or school.status in (out.CLOSED_STAGES | out.REPLIED_STAGES):
                     member.status='skipped';member.reason='Contact or school eligibility changed';continue
                 ledger=svc.ContactOutreachLedger.query.filter_by(campaign_id=snap['campaign']['id'],contact_id=contact.id,step='intro').first()

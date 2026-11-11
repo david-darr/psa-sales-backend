@@ -2202,7 +2202,7 @@ class SmtpSender:
         while the message is in flight raises AmbiguousDelivery and is never resent here, because
         the provider may already have accepted it.
         """
-        if has_app_context() and contact_is_blocked(job['to_email'], independent=True):
+        if has_app_context() and contact_is_blocked(job['to_email'], independent=True,school_id=job.get('school_id')):
             raise ValueError('This mailbox is marked do not contact')
         # Each attachment message is a few MB in memory while it is built and flattened, so only
         # a few run at once per process no matter how many batches are active.

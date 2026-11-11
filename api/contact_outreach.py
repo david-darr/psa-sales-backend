@@ -122,7 +122,7 @@ def register_contact_outreach(app, db, svc, out):
             if options['kind'] == 'followup' and cam['id'] != 'standard': latest = intro_originals.get(contact.id)
             blockers = []
             if unresolved: blockers.append('choose_school_context')
-            if contact.do_not_contact: blockers.append('unsubscribed')
+            if contact.do_not_contact or link.do_not_contact: blockers.append('unsubscribed')
             if school.status in out.CLOSED_STAGES: blockers.append('closed')
             if school.status in out.REPLIED_STAGES or (latest and latest.responded and
                 (options['kind'] == 'followup' or cam['id'] == 'standard')): blockers.append('replied')
@@ -276,13 +276,13 @@ def register_contact_outreach(app, db, svc, out):
             func.max(func.coalesce(svc.SentMessage.sent_at, svc.SentEmail.sent_at))).outerjoin(svc.SentMessage).filter(
             svc.SentEmail.user_id == user.id, svc.SentEmail.sales_school_id.in_([s.id for s in schools])).group_by(svc.SentEmail.sales_school_id).all())
         grouped = {}
-        for link, contact in links: grouped.setdefault(link.school_id, []).append(contact)
+        for link, contact in links: grouped.setdefault(link.school_id, []).append((contact,link))
         items = []
         for school in schools:
             contacts = grouped.get(school.id, [])
             blockers = []
             if not contacts: blockers.append('missing_email')
-            elif all(c.do_not_contact for c in contacts): blockers.append('unsubscribed')
+            elif all(c.do_not_contact or l.do_not_contact for c,l in contacts): blockers.append('unsubscribed')
             if school.status in out.CLOSED_STAGES: blockers.append('closed')
             if school.status in out.REPLIED_STAGES: blockers.append('replied')
             if not user.email_password: blockers.append('no_mailbox')
@@ -340,7 +340,7 @@ def register_contact_outreach(app, db, svc, out):
             raise ValueError('Enter a valid subject and reply')
         contact = svc.Contact.query.filter_by(email=original.school_email.strip().casefold()).first()
         link = svc.SchoolContact.query.filter_by(school_id=school.id, contact_id=contact.id).first() if contact else None
-        if not contact or not link or svc.contact_is_blocked(contact.email):
+        if not contact or not link or svc.contact_is_blocked(contact.email,school_id=school.id):
             raise ValueError('This conversation contact is unavailable or suppressed')
         return original, school, contact, link, dict(email=contact.email, subject=data['subject'], body_text=data['message'],
             ownership_version=school.ownership_version, contact_version=contact.version, link_version=link.version,

@@ -32,11 +32,18 @@ def now():
     return datetime.now(timezone.utc).replace(tzinfo=None)
 
 
+def validate_encoding(*values):
+    # Detect specific UTF-8/Windows-1252 corruption, never silently rewrite copy.
+    if any(re.search(r'\u00c2\u00b7|\u00e2\u20ac[\u2122\u0153\u201c\u201d\u2013\u2014\u00a6]|\ufffd', value) for value in values):
+        raise ValueError('Text appears to contain damaged characters. Copy the original text or upload a UTF-8 JSON file, then review it again.')
+
+
 def validate_copy(subject, body):
     if not isinstance(subject, str) or not subject.strip() or len(subject) > 200 or any(c in subject for c in '\r\n'):
         raise ValueError('Enter a subject of 1 to 200 characters, without line breaks.')
     if not isinstance(body, str) or not body.strip() or len(body) > 20000:
         raise ValueError('Enter a message of 1 to 20,000 characters.')
+    validate_encoding(subject,body)
     for match in TOKEN.finditer(subject + '\n' + body):
         key = match[1] if match[1] is not None else ALIASES.get(match[2])
         if key not in FIELDS:
@@ -58,6 +65,7 @@ def render_copy(subject, body, school, user):
             raise ValueError('Missing ' + key + ' for ' + school.school_name + '.')
         return value
     result = TOKEN.sub(replace, subject), TOKEN.sub(replace, body)
+    validate_encoding(*result)
     if len(result[0]) > 200 or any(c in result[0] for c in '\r\n'):
         raise ValueError('The merged subject must have at most 200 characters and no line breaks.')
     return result

@@ -33,6 +33,10 @@ with service.app.app_context():
     with engine.begin() as connection:
         connection.execute(text('DROP SCHEMA public CASCADE; CREATE SCHEMA public'))
     excluded = {'contacts', 'school_contacts', 'contact_events', 'contact_imports', 'contact_import_guard'}
+    while True:
+        dependent={name for name,table in db.metadata.tables.items() if any(fk.column.table.name in excluded for fk in table.foreign_keys)}
+        if dependent <= excluded:break
+        excluded.update(dependent)
     db.metadata.create_all(engine, tables=[table for name, table in db.metadata.tables.items() if name not in excluded])
     with engine.begin() as connection:
         for role in ('anon', 'authenticated'):
@@ -46,13 +50,15 @@ with service.app.app_context():
         connection.execute(service.SchoolActivity.__table__.insert().values(sales_school_id=1, actor_id=1, kind='unsubscribed', detail='Legacy opt-out'))
         connection.execute(text("select setval(pg_get_serial_sequence('sales_schools','id'), 3)"))
         connection.execute(text("select setval(pg_get_serial_sequence('users','id'), 1)"))
-    migration = (Path(__file__).resolve().parents[1] / 'migrations/20261105_contacts.sql').read_text()
+    migration = '\n'.join((Path(__file__).resolve().parents[1] / ('migrations/'+name)).read_text() for name in ('20261105_contacts.sql','20261111_school_contact_suppression.sql'))
     for _ in range(2):
         raw = engine.raw_connection()
         try:
             cursor = raw.cursor(); cursor.execute(migration); raw.commit(); cursor.close()
         finally:
             raw.close()
+    db.metadata.create_all(engine)
+    assert service.SchoolContact.query.filter_by(do_not_contact=True).count()==0
     assert service.Contact.query.count() == 2
     assert service.Contact.query.filter_by(do_not_contact=True).count() == 2
     assert service.SchoolContact.query.count() == 3
@@ -127,3 +133,18 @@ with service.app.app_context():
     assert service.Contact.query.filter_by(email=contact['email'],do_not_contact=True).count() == 1
     assert service.ContactEvent.query.filter_by(school_id=None).count() >= 1
 print('Postgres contacts passed: rerunnable migration, malformed-JSON backfill, shared mailboxes, preserved opt-outs, RLS/grants, concurrent commits and conflicting previews.')
+
+with service.app.app_context():
+    candidate=db.session.query(service.SalesSchool,service.Contact).join(service.SchoolContact,service.SchoolContact.school_id==service.SalesSchool.id).join(service.Contact).filter(service.Contact.do_not_contact.is_(False)).first()
+    school,mailbox=candidate
+    sister=service.SalesSchool(school_name='Scoped suppression sister',email=mailbox.email,user_id=1,status='pending')
+    db.session.add(sister);db.session.commit()
+    school_id,sister_id,address=school.id,sister.id,mailbox.email
+with service.app.test_client() as client:
+    row=client.get(f'/api/sales-schools/{school_id}/contacts',headers=headers).get_json()['contacts'][0]
+    result=client.patch(f'/api/sales-schools/{school_id}/contacts/{row["id"]}',headers=headers,json=dict(version=row['version'],contact_version=row['contact_version'],school_do_not_contact=True,school_suppression_reason='Local test stop'))
+    assert result.status_code==200,result.get_json()
+with service.app.app_context():
+    assert service.contact_is_blocked(address,independent=True,school_id=school_id)
+    assert not service.contact_is_blocked(address,independent=True,school_id=sister_id)
+print('PASS school-local suppression: independent PostgreSQL pre-send check blocks one school, preserves shared sister school and global opt-outs.')

@@ -291,7 +291,8 @@ def school_rows_query():
     ).join(SM, SM.sent_email_id == SE.id).filter(
         SE.sales_school_id.isnot(None)).group_by(SE.sales_school_id).subquery('message_agg')
     suppressed = or_(exists().where(SA.sales_school_id == S.id, SA.kind.in_(SUPPRESSION_KINDS)).correlate(S),
-        exists().where(svc.Contact.email == func.lower(func.trim(S.email)), svc.Contact.do_not_contact.is_(True)).correlate(S))
+        exists().where(svc.Contact.email == func.lower(func.trim(S.email)), svc.Contact.do_not_contact.is_(True)).correlate(S),
+        exists().where(svc.SchoolContact.school_id==S.id,svc.SchoolContact.do_not_contact.is_(True),svc.SchoolContact.contact_id==svc.Contact.id,svc.Contact.email==func.lower(func.trim(S.email))).correlate(S))
     query = db.session.query(
         S, Latest, email_agg.c.last_email_at, email_agg.c.responded_any, message_agg.c.last_message_at,
         suppressed.label('suppressed'), Owner.name.label('owner_name'),
@@ -337,7 +338,7 @@ def compute_blockers(kind, row, viewer_id, in_flight=frozenset()):
     if suppressed:
         blockers.add('unsubscribed')
     if normalized_email := chosen_email(school, latest, kind):
-        if normalized_email.strip().casefold() != (school.email or '').strip().casefold() and svc.contact_is_blocked(normalized_email):
+        if normalized_email.strip().casefold() != (school.email or '').strip().casefold() and svc.contact_is_blocked(normalized_email, school_id=school.id):
             blockers.add('unsubscribed')
     if school.status in CLOSED_STAGES:
         blockers.add('closed')
@@ -737,7 +738,7 @@ def skip_reason(batch, recipient, school):
             return 'superseded_review'
         contact = db.session.get(svc.Contact, recipient.contact_id)
         link = db.session.get(svc.SchoolContact, recipient.contact_link_id)
-        if not contact or contact.email != recipient.email or svc.contact_is_blocked(contact.email):
+        if not contact or contact.email != recipient.email or svc.contact_is_blocked(contact.email,school_id=recipient.school_id):
             return 'unsubscribed'
         if not link or link.contact_id != contact.id or link.school_id != recipient.school_id or link.version != recipient.link_version or contact.version != recipient.contact_version:
             return 'contact_changed'
@@ -750,7 +751,7 @@ def skip_reason(batch, recipient, school):
         return 'owner_changed'
     if not svc.valid_email(recipient.email):
         return 'missing_email'
-    if svc.contact_is_blocked(recipient.email):
+    if svc.contact_is_blocked(recipient.email,school_id=recipient.school_id):
         return 'unsubscribed'
     if batch.kind == 'reply':
         original = db.session.get(svc.SentEmail, recipient.followup_of_email_id)
@@ -825,7 +826,7 @@ def _process_recipient(batch, user_id, recipient, sender, quota):
         db.session.commit()
         return 'skipped'
 
-    job = {'to_email': recipient.email, 'subject': recipient.subject or '', 'body': recipient.body or '',
+    job = {'school_id':recipient.school_id, 'to_email': recipient.email, 'subject': recipient.subject or '', 'body': recipient.body or '',
            'pdf_files': json.loads(recipient.attachments or '[]')}
     original = None
     if batch.kind in ('followup', 'reply', 'sequence') and recipient.followup_of_email_id:

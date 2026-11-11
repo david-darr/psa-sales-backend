@@ -391,3 +391,19 @@ class TemplateLibraryTests(OutreachBase):
             self.assertEqual(catalog[0]['id'],response.get_json()['id'])
             self.assertEqual(service.MailTemplate.query.count(),0)
             self.assertEqual(self.client.post(path,headers=self.auth(self.admin),json={'filename':'../api.py'}).status_code,400)
+
+    def test_unicode_template_preview_and_mime_preserve_original_characters(self):
+        from email.header import decode_header,make_header
+        school=self.school('Ecole test');school.school_name='\u00c9cole \u00b7 Fairfax';school.contact_name='Jos\u00e9';service.db.session.commit()
+        subject='Enrichment \u00b7 {school name}'
+        body='Hello {contact name} \u2014 caf\u00e9 \u2022 \u00a320 \u201cWinter\u201d'
+        saved=self.template(subject=subject,body=body)
+        review=self.preview(self.payload(school,saved)).get_json()['previews'][0]
+        expected=render_copy(subject,body,school,self.owner)
+        self.assertEqual(review['subject'],expected[0]);self.assertEqual(review['body_text'],expected[1])
+        message=service.build_email_message(self.owner.email,self.owner.name,school.email,expected[0],expected[1],[])
+        self.assertEqual(str(make_header(decode_header(message['Subject']))),expected[0])
+        plain=next(part for part in message.walk() if part.get_content_type()=='text/plain')
+        self.assertEqual(plain.get_payload(decode=True).decode(plain.get_content_charset()),expected[1])
+        for broken in ('Broken \u00c2\u00b7 text','Broken \ufffd text'):
+            with self.assertRaisesRegex(ValueError,'damaged characters'):validate_copy('Subject',broken)

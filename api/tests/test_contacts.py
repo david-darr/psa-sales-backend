@@ -178,3 +178,39 @@ class ContactsTests(AdminSalesBase):
         result = self.commit(bad, skip_invalid=True)
         self.assertEqual(result.status_code, 200, result.get_json())
         self.assertEqual(result.get_json()['rows_skipped'], 1)
+
+    def test_school_only_stop_preserves_shared_contact_and_other_school(self):
+        shared=self.school('Shared PTA sister school',self.mary,'pending')
+        shared.email=self.open_school.email;service.db.session.commit()
+        first=self.listing().get_json()['contacts'][0]
+        other=self.listing(shared,self.mary).get_json()['contacts'][0]
+        url=f"/api/sales-schools/{self.open_school.id}/contacts/{first['id']}"
+        response=self.client.patch(url,headers=self.auth(self.john),json=dict(version=first['version'],contact_version=first['contact_version'],school_do_not_contact=True,school_suppression_reason='School asked to pause'))
+        self.assertEqual(response.status_code,200,response.get_json())
+        result=response.get_json()
+        self.assertTrue(result['school_do_not_contact']);self.assertTrue(result['effective_do_not_contact'])
+        self.assertFalse(result['do_not_contact'])
+        self.assertEqual(result['contact_version'],first['contact_version'])
+        unchanged=self.listing(shared,self.mary).get_json()['contacts'][0]
+        self.assertEqual(unchanged,other)
+        self.assertTrue(service.contact_is_blocked(shared.email,school_id=self.open_school.id))
+        self.assertFalse(service.contact_is_blocked(shared.email,school_id=shared.id))
+        self.assertFalse(service.contact_is_blocked(shared.email))
+        with patch.object(service.SmtpSender,'_build_and_send') as send:
+            sender=service.SmtpSender('sender@example.test','fake','Test')
+            with self.assertRaises(ValueError):sender.send(dict(to_email=shared.email,school_id=self.open_school.id,pdf_files=[]))
+            sender.send(dict(to_email=shared.email,school_id=shared.id,pdf_files=[]))
+            self.assertEqual(send.call_count,1)
+        response=self.client.patch(url,headers=self.auth(self.john),json=dict(version=result['version'],contact_version=result['contact_version'],school_do_not_contact=False,school_suppression_reason='School requested restart'))
+        self.assertEqual(response.status_code,200)
+        contact=service.db.session.get(service.Contact,result['contact_id']);contact.do_not_contact=True;service.db.session.commit()
+        self.assertTrue(service.contact_is_blocked(shared.email,school_id=shared.id))
+        self.assertTrue(service.contact_is_blocked(shared.email,school_id=self.open_school.id))
+
+    def test_school_stop_requires_reason_and_remains_owner_scoped(self):
+        row=self.listing().get_json()['contacts'][0]
+        url=f"/api/sales-schools/{self.open_school.id}/contacts/{row['id']}"
+        body=dict(version=row['version'],contact_version=row['contact_version'],school_do_not_contact=True)
+        self.assertEqual(self.client.patch(url,headers=self.auth(self.john),json=body).status_code,400)
+        body['school_suppression_reason']='Asked to stop'
+        self.assertEqual(self.client.patch(url,headers=self.auth(self.mary),json=body).status_code,404)
