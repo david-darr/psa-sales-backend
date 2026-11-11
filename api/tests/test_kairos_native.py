@@ -247,3 +247,53 @@ class KairosNativeTests(OutreachBase):
         self.assertEqual(svc.AgentApiKey.query.count(),1)
         self.assertEqual(svc.AgentApiKey.query.one().key_hash,old)
         self.assertEqual(chat['psa'].request('GET','/me')['key']['scope'],'write')
+
+    def test_file_reference_upload_handles_large_flyer_without_model_base64(self):
+        from tempfile import TemporaryDirectory
+        from hashlib import sha256
+        self.owner.admin=True;svc.db.session.commit();self.connect(capabilities=['library:manage'])
+        with TemporaryDirectory() as folder:
+            path=Path(folder)/'Sponsor flyer.pdf';raw=b'%PDF-1.4\n'+b'A'*2_900_000+b'\n%%EOF';path.write_bytes(raw)
+            args={'file_path':str(path)}
+            review=catalog.call_tool('psa_upload_pdf_file',args,self.agent())
+            self.assertTrue(review['confirmation_required']);self.assertEqual(review['bytes'],len(raw))
+            self.assertLess(len(json.dumps(review)),1000)
+            self.assertEqual(review['expected_sha256'],sha256(raw).hexdigest())
+            self.assertNotIn(('POST','/api/agent/v1/operations/psa_upload_pdf'),self.calls)
+            with self.assertRaises(ValueError):catalog.call_tool('psa_upload_pdf_file',{**args,'confirm':True},self.agent())
+            saved=catalog.call_tool('psa_upload_pdf_file',{**args,'confirm':True,'expected_sha256':review['expected_sha256']},self.agent())
+            self.assertEqual(saved['bytes'],len(raw));self.assertEqual(saved['id'],sha256(raw).hexdigest())
+            self.assertNotIn('encoded',saved)
+            template=self.native.request('chris','POST','/api/outreach/templates',dict(name='File ref flyer',kind='initial',step=0,audience='general',subject='Hi',body='Hello',attachment_ids=[saved['id']]))
+            self.assertEqual(template['attachments'][0]['id'],saved['id'])
+            path.write_bytes(b'%PDF-1.4\nChanged after review\n%%EOF')
+            with self.assertRaisesRegex(ValueError,'changed after review'):catalog.call_tool('psa_upload_pdf_file',{**args,'confirm':True,'expected_sha256':review['expected_sha256']},self.agent())
+        self.assertEqual(self.fake.sent,[])
+
+    def test_file_reference_upload_denies_rep_before_reading_source(self):
+        self.connect()
+        with self.assertRaises(catalog.ApiError) as caught:
+            catalog.call_tool('psa_upload_pdf_file',{'file_path':str(Path(tempfile.gettempdir())/'not-present.pdf')},self.agent())
+        self.assertEqual(caught.exception.status,403)
+
+    def test_file_reference_validates_source_type_size_and_path(self):
+        from tempfile import TemporaryDirectory
+        with TemporaryDirectory() as folder:
+            path=Path(folder)/'Bad.pdf';path.write_bytes(b'Not actually a PDF')
+            invalid=['relative.pdf','https://example.test/file.pdf',str(path),str(Path(folder)/'Missing.pdf'),str(Path(folder)/'Folder.pdf')]
+            (Path(folder)/'Folder.pdf').mkdir()
+            for value in invalid:
+                with self.assertRaises(ValueError):catalog.read_pdf_file_reference(value)
+            path.write_bytes(b'%PDF-')
+            with path.open('r+b') as stream:stream.truncate(10*1024*1024+1)
+            with self.assertRaises(ValueError):catalog.read_pdf_file_reference(str(path))
+            path.write_bytes(b'%PDF-1.4\nValid\n%%EOF')
+            with self.assertRaises(ValueError):catalog.read_pdf_file_reference(str(path),'Bad.txt')
+
+    def test_file_reference_refuses_reparse_points_before_opening(self):
+        import stat
+        from types import SimpleNamespace
+        from unittest.mock import patch
+        path=str(Path(tempfile.gettempdir())/'Flyer.pdf')
+        with patch.object(catalog.Path,'lstat',return_value=SimpleNamespace(st_mode=stat.S_IFREG,st_file_attributes=0x400)):
+            with self.assertRaisesRegex(ValueError,'reparse'):catalog.read_pdf_file_reference(path)
