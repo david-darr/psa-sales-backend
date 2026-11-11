@@ -19,7 +19,7 @@ NULL_ID = {'anyOf': [ID, {'type': 'null'}]}
 STRINGS = {'type': 'array', 'items': S, 'maxItems': 50}
 IDS = {'type': 'array', 'items': ID, 'minItems': 1, 'maxItems': 100}
 FILTERS = {'type': 'object', 'properties': {k: S for k in ('q','stage','type','owner','county','scope','due')}, 'additionalProperties': False}
-CONTACT = {'email': S, 'name': S, 'roles': STRINGS, 'tags': STRINGS, 'is_primary': BOOL, 'do_not_contact': BOOL, 'suppression_reason': S}
+CONTACT = {'email': S, 'name': S, 'roles': STRINGS, 'tags': STRINGS, 'is_primary': BOOL, 'do_not_contact': BOOL, 'suppression_reason': S, 'school_do_not_contact':BOOL, 'school_suppression_reason':S}
 TEMPLATE = {'name': S, 'kind': {'enum': ['initial','followup']}, 'audience': S, 'step': {'type':'integer','minimum':0,'maximum':3}, 'subject': S, 'body': S, 'attachment_ids': {'type':'array','items':S,'maxItems':3}}
 COMMISSION = {k:S for k in ('season','program','sale_type','gross','cash_expenses','notes')}
 COMMISSION.update(sales_school_id=ID,rep_id=ID,leagueapps=BOOL,rep_payout={'anyOf':[S,{'type':'null'}]},voided=BOOL,revision=ID)
@@ -39,7 +39,7 @@ operation('psa_create_school','Add a school with duplicate protection. Use conta
 operation('psa_edit_school','Edit school details, stage, county, notes or next action using normal school access rules.','sales_school_workspace','PATCH',
     {**{k:S for k in ('school_name','email','contact_name','phone','address','school_type','website','county','status','notes','next_action','next_action_at')},'school_id':ID,'user_id':NULL_ID,'additional_emails':STRINGS},['school_id'],'write',params={'school_id':'school_id'})
 operation('psa_delete_schools','Permanently delete selected owned schools. Review IDs and names first. Sent history is retained.','crm_delete_schools','POST',{'ids':IDS},['ids'],'write')
-operation('psa_add_contact','Add a role-based school contact. Shared mailbox suppression remains global.','school_contacts','POST',{'school_id':ID,**CONTACT},['school_id','email'],'write',params={'school_id':'sid'})
+operation('psa_add_contact','Add a role-based school contact. School-specific suppression is separate from global mailbox opt-outs.','school_contacts','POST',{'school_id':ID,**CONTACT},['school_id','email'],'write',params={'school_id':'sid'})
 operation('psa_edit_contact','Edit a linked contact using current link and contact versions. Only admins may lift suppression.','patch_contact','PATCH',{'school_id':ID,'link_id':ID,'version':ID,'contact_version':ID,**{k:v for k,v in CONTACT.items() if k!='email'}},['school_id','link_id','version','contact_version'],'write',params={'school_id':'sid','link_id':'lid'})
 operation('psa_report_contact','Record an opt-out, complaint or review signal and pause affected outreach. Explain the source.','report','POST',{'contact_id':ID,'kind':{'enum':['optout','complaint','review']},'detail':S},['contact_id','kind','detail'],'write',params={'contact_id':'contact_id'})
 operation('psa_assignment_preview','Admin: preview moving matching schools to a rep or the unassigned pool. Never changes owners.','assignment_preview','POST',{'user_id':NULL_ID,'ids':{'type':'array','items':ID,'minItems':1,'maxItems':2000},'filters':FILTERS},['user_id'],'write',True)

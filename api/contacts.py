@@ -95,6 +95,8 @@ def register_contacts(app, db, User, School, Activity):
         roles_json = db.Column(db.Text, nullable=False, default='["unknown"]', server_default='["unknown"]')
         tags_json = db.Column(db.Text, nullable=False, default='[]', server_default='[]')
         is_primary = db.Column(db.Boolean, nullable=False, default=False, server_default='false')
+        do_not_contact = db.Column(db.Boolean, nullable=False, default=False, server_default='false')
+        suppression_reason = db.Column(db.Text, nullable=False, default='', server_default='')
         version = db.Column(db.Integer, nullable=False, default=1, server_default='1')
         __table_args__ = (db.UniqueConstraint('school_id', 'contact_id', name='uq_school_contact'),)
 
@@ -171,11 +173,17 @@ def register_contacts(app, db, User, School, Activity):
         school = School.query.filter_by(id=sid).populate_existing().with_for_update().first() if lock else db.session.get(School, sid)
         return school if school and user and (user.admin or school.user_id == user.id) else None
 
-    def blocked(address, independent=False):
+    def blocked(address, independent=False, school_id=None):
+        query=select(Contact.id).where(Contact.email == normalized(address))
+        if school_id is None:
+            query=query.where(Contact.do_not_contact.is_(True))
+        else:
+            query=query.outerjoin(SchoolContact,(SchoolContact.contact_id==Contact.id) & (SchoolContact.school_id==school_id)).where(
+                Contact.do_not_contact.is_(True) | SchoolContact.do_not_contact.is_(True))
         if independent and db.engine.dialect.name == 'postgresql':
             with db.engine.connect() as connection:
-                return connection.execute(select(Contact.id).where(Contact.email == normalized(address), Contact.do_not_contact.is_(True))).first() is not None
-        return Contact.query.filter_by(email=normalized(address), do_not_contact=True).first() is not None
+                return connection.execute(query).first() is not None
+        return db.session.execute(query).first() is not None
 
     def serialize(link, user):
         contact = db.session.get(Contact, link.contact_id)
@@ -185,6 +193,8 @@ def register_contacts(app, db, User, School, Activity):
                     roles=json.loads(link.roles_json), tags=json.loads(link.tags_json), is_primary=link.is_primary,
                     version=link.version, contact_version=contact.version, do_not_contact=contact.do_not_contact,
                     suppression_reason=contact.suppression_reason,
+                    school_do_not_contact=link.do_not_contact, school_suppression_reason=link.suppression_reason,
+                    effective_do_not_contact=contact.do_not_contact or link.do_not_contact,
                     shared_schools=[dict(id=s.id, name=s.school_name) for s in visible], linked_school_count=len(linked))
 
     def audit(contact, school, user, detail):
@@ -215,8 +225,11 @@ def register_contacts(app, db, User, School, Activity):
             return jsonify(contacts=[serialize(link, user) for link in links], roles=list(ROLES), county=school.county or '')
         data = request.get_json(silent=True)
         try:
-            if not isinstance(data, dict) or set(data) - {'email', 'name', 'roles', 'tags', 'is_primary', 'do_not_contact', 'suppression_reason'}:
+            if not isinstance(data, dict) or set(data) - {'email', 'name', 'roles', 'tags', 'is_primary', 'do_not_contact', 'suppression_reason', 'school_do_not_contact', 'school_suppression_reason'}:
                 raise ValueError('Supply contact fields only')
+            local_dnc=data.get('school_do_not_contact',False)
+            local_reason=text(data.get('school_suppression_reason',''),500,'School suppression reason')
+            if type(local_dnc) is not bool or (local_dnc and not local_reason):raise ValueError('Record a reason for school-specific do-not-contact')
             address = mailbox(data.get('email'))
             name = text(data.get('name', ''), 150, 'Name')
             wanted_roles = roles(data.get('roles'))
@@ -243,7 +256,7 @@ def register_contacts(app, db, User, School, Activity):
             contact.do_not_contact, contact.suppression_reason = True, reason
             contact.version += 1
         link = SchoolContact(school_id=sid, contact_id=contact.id, name=name,
-                             roles_json=json.dumps(wanted_roles), tags_json=json.dumps(tags))
+                             roles_json=json.dumps(wanted_roles), tags_json=json.dumps(tags), do_not_contact=local_dnc, suppression_reason=local_reason)
         if data.get('is_primary'):
             SchoolContact.query.filter_by(school_id=sid).update({'is_primary': False})
             link.is_primary = True
@@ -261,7 +274,7 @@ def register_contacts(app, db, User, School, Activity):
         if not school:
             return jsonify(error='School not found'), 404
         data = request.get_json(silent=True)
-        if not isinstance(data, dict) or set(data) - {'name', 'roles', 'tags', 'is_primary', 'do_not_contact', 'suppression_reason', 'version', 'contact_version'}:
+        if not isinstance(data, dict) or set(data) - {'name', 'roles', 'tags', 'is_primary', 'do_not_contact', 'suppression_reason', 'version', 'contact_version', 'school_do_not_contact', 'school_suppression_reason'}:
             return jsonify(error='Supply contact changes only'), 400
         lock_writes()
         school = accessible(sid, user, lock=True)
@@ -275,6 +288,9 @@ def register_contacts(app, db, User, School, Activity):
                 type(data.get('contact_version')) is not int or data['contact_version'] != contact.version):
             return jsonify(error='This contact changed. Refresh before saving.'), 409
         try:
+            local_dnc=data.get('school_do_not_contact',link.do_not_contact)
+            local_reason=text(data.get('school_suppression_reason',link.suppression_reason),500,'School suppression reason')
+            if type(local_dnc) is not bool or (local_dnc != link.do_not_contact and not local_reason):raise ValueError('Record a reason when changing school-specific do-not-contact')
             name = text(data.get('name', link.name), 150, 'Name')
             wanted_roles = roles(data.get('roles', json.loads(link.roles_json)))
             tags = parse_tags(data.get('tags', json.loads(link.tags_json)))
@@ -296,8 +312,10 @@ def register_contacts(app, db, User, School, Activity):
         if data.get('is_primary'):
             SchoolContact.query.filter_by(school_id=sid).update({'is_primary': False})
             link.is_primary = True
-        contact.do_not_contact, contact.suppression_reason = dnc, reason
-        contact.version += 1
+        if (contact.do_not_contact,contact.suppression_reason)!=(dnc,reason):
+            contact.do_not_contact, contact.suppression_reason = dnc, reason
+            contact.version += 1
+        link.do_not_contact,link.suppression_reason=local_dnc,local_reason
         project(school)
         audit(contact, school, user, json.dumps({'before': before, 'after': serialize(link, user)}))
         db.session.commit()
@@ -307,7 +325,7 @@ def register_contacts(app, db, User, School, Activity):
         values = [
             [(s.id, s.school_name, s.address, s.county, s.user_id, s.status, s.email, s.additional_emails, s.notes) for s in School.query.order_by(School.id)],
             [(c.id, c.email, c.version, c.do_not_contact) for c in Contact.query.order_by(Contact.id)],
-            [(l.id, l.school_id, l.contact_id, l.version, l.name, l.roles_json, l.tags_json, l.is_primary) for l in SchoolContact.query.order_by(SchoolContact.id)],
+            [(l.id, l.school_id, l.contact_id, l.version, l.name, l.roles_json, l.tags_json, l.is_primary, l.do_not_contact, l.suppression_reason) for l in SchoolContact.query.order_by(SchoolContact.id)],
         ]
         return hashlib.sha256(json.dumps(values, sort_keys=True).encode()).hexdigest()
 

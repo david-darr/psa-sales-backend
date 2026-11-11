@@ -308,7 +308,7 @@
   },
   {
     "name": "psa_add_contact",
-    "description": "Add a role-based school contact. Shared mailbox suppression remains global. Requires write.",
+    "description": "Add a role-based school contact. School-specific suppression is separate from global mailbox opt-outs. Requires write.",
     "inputSchema": {
       "type": "object",
       "properties": {
@@ -347,6 +347,13 @@
           "type": "boolean"
         },
         "suppression_reason": {
+          "type": "string",
+          "maxLength": 20000
+        },
+        "school_do_not_contact": {
+          "type": "boolean"
+        },
+        "school_suppression_reason": {
           "type": "string",
           "maxLength": 20000
         }
@@ -414,6 +421,13 @@
           "type": "boolean"
         },
         "suppression_reason": {
+          "type": "string",
+          "maxLength": 20000
+        },
+        "school_do_not_contact": {
+          "type": "boolean"
+        },
+        "school_suppression_reason": {
           "type": "string",
           "maxLength": 20000
         }

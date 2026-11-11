@@ -340,3 +340,17 @@ class ContactOutreachTests(OutreachBase):
         self.assertTrue(svc.process_delivery_report(report(school.email), {'<original@test>': sent}, self.owner.id))
         svc.db.session.commit()
         self.assertTrue(svc.contact_is_blocked(school.email))
+
+    def test_school_stop_blocks_reviewed_queue_but_not_other_school_context(self):
+        first=self.school('First PTA');other=self.school('Second PTA')
+        other.email=first.email;svc.db.session.commit()
+        payload=self.payload(first)
+        review=self.preview(payload);queued=self.send(payload,review)
+        self.assertEqual(queued.status_code,202,queued.get_json())
+        link=svc.SchoolContact.query.filter_by(school_id=first.id).first()
+        link.do_not_contact=True;link.suppression_reason='This school only';link.version+=1;svc.db.session.commit()
+        batch=outreach.OutreachBatch.query.get(queued.get_json()['batch_id'])
+        outreach.run_batch(svc.app,batch.id,batch.worker_token,delay=0)
+        self.assertEqual(self.fake.sent,[])
+        self.assertFalse(self.preview(self.payload(first))['previews'][0]['eligible'])
+        self.assertTrue(self.preview(self.payload(other))['previews'][0]['eligible'])

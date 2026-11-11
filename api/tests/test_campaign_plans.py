@@ -199,3 +199,13 @@ class CampaignPlanTests(OutreachBase):
         self.action(current,'cancel')
         self.time.return_value+=timedelta(days=30)
         self.assertEqual(svc.schedule_sequences(),0)
+
+    def test_school_specific_stop_does_not_stop_sister_school_campaign(self):
+        first=self.school('PTA school A');other=self.school('PTA school B')
+        other.email=first.email;svc.db.session.commit()
+        a=self.approve(self.prepare([first]));b=self.approve(self.prepare([other]))
+        link=svc.SchoolContact.query.filter_by(school_id=first.id).first()
+        link.do_not_contact=True;link.suppression_reason='School A only';link.version+=1;svc.db.session.commit()
+        svc.schedule_campaigns();self.send_batches()
+        self.assertEqual(self.fake.sent,[other.email])
+        self.assertEqual(svc.CampaignMember.query.filter_by(plan_id=a['id']).one().status,'skipped')
