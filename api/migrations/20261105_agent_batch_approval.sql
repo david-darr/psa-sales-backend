@@ -2,6 +2,10 @@
 -- Existing keys receive no new permissions. Creates no key or approval.
 BEGIN;
 ALTER TABLE agent_api_keys ALTER COLUMN scopes TYPE VARCHAR(255);
+ALTER TABLE agent_api_keys DROP CONSTRAINT IF EXISTS agent_api_keys_scopes_check;
+ALTER TABLE agent_api_keys ADD CONSTRAINT agent_api_keys_scopes_check CHECK (
+ scopes ~ '^read(,write)?(,(schools:import|outreach:read|outreach:prepare|outreach:send|library:manage|commissions:manage|team:manage))*$'
+);
 CREATE TABLE IF NOT EXISTS agent_outreach_drafts (
  id VARCHAR(36) PRIMARY KEY, user_id INTEGER NOT NULL REFERENCES users(id),
  key_id INTEGER NOT NULL REFERENCES agent_api_keys(id), settings TEXT NOT NULL,

@@ -24,7 +24,7 @@ from datetime import timedelta
 
 from flask import g, jsonify, request
 from flask_jwt_extended import create_access_token, get_jwt_identity, jwt_required
-from sqlalchemy.exc import OperationalError, ProgrammingError
+from sqlalchemy.exc import IntegrityError, OperationalError, ProgrammingError
 
 KEY_PREFIX = 'psak_'
 KEY_PATTERN = re.compile(r'^psak_[0-9a-f]{64}$')
@@ -137,7 +137,7 @@ def register_agent_api(app, db, User, utc_now):
             db.session.commit()
             # The only time the full key is returned. It is never stored or logged.
             return jsonify(key=token, **key_dict(key)), 201
-        except (ProgrammingError, OperationalError):
+        except (ProgrammingError, OperationalError, IntegrityError):
             return unavailable()
 
     @app.delete('/api/agent-keys/<int:key_id>')

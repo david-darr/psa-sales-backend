@@ -15,6 +15,16 @@ BASE = '/api/agent/v1'
 
 
 class AgentApiTests(unittest.TestCase):
+    def test_key_storage_integrity_failure_is_safe_and_actionable(self):
+        from sqlalchemy.exc import IntegrityError
+        headers=self.jwt(self.rep)
+        with patch.object(service.db.session,'commit',side_effect=IntegrityError('INSERT',{},Exception('private database detail'))):
+            response=self.client.post('/api/agent-keys',headers=headers,
+                json=dict(name='Local connection',scope='read',expires_in_days=30))
+        self.assertEqual(response.status_code,503)
+        self.assertNotIn('private',str(response.get_json()))
+        self.assertEqual(service.AgentApiKey.query.count(),0)
+
     def setUp(self):
         self.context = service.app.app_context()
         self.context.push()
