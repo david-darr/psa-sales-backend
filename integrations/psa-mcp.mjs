@@ -1,6 +1,7 @@
 // Dependency-free MCP stdio bridge for PSA Sales. Node 22+. No HTTP listener or credentials in stdout.
 import {createInterface} from 'node:readline';
 import {pathToFileURL} from 'node:url';
+import {pdfFileTool,uploadPdfFileReference} from './pdf-file-upload.mjs';
 import {createPsaClient} from './psa-client.mjs';
 import {workflowTools,workflowRoutes} from './agent-workflow-tools.mjs';
 
@@ -10,7 +11,7 @@ const page={page:{type:'integer',minimum:1},limit:{type:'integer',minimum:1,maxi
 const scope={enum:['mine','team'],description:'Administrators see the team by default; mine limits to their own records'};
 const stage={enum:['pending','contacted','replied','meeting','partner','former','not_interested']};
 function tool(name,description,properties={},required=[],readOnly=true){return {name,description,inputSchema:{type:'object',properties,required,additionalProperties:false},annotations:{readOnlyHint:readOnly,destructiveHint:false,idempotentHint:readOnly,openWorldHint:false}}}
-export const tools=[...workflowTools,
+export const tools=[pdfFileTool,...workflowTools,
  tool('psa_connection','Identify the connected PSA Sales employee, role (admin or rep), key scope and expiry.'),
  tool('psa_team','Administrators: list reps with school, email, reply and overdue task counts.',{today:day}),
  tool('psa_pipeline','Pipeline summary: stage counts, response rate, due follow-ups, open and overdue tasks, upcoming actions, recent activity. Reps see their own; admins see the team.',{scope,today:day}),
@@ -51,6 +52,7 @@ export async function callTool(request,name,args={}){
  for(const value of [school_id,task_id,batch_id,email_id,enrollment_id])if(value!==undefined&&!(Number.isInteger(value)&&value>0))throw new Error('Invalid record ID');
  for(const value of [draft_id,import_id,plan_id])if(value!==undefined&&(typeof value!=='string'||!/^[A-Za-z0-9_-]{1,100}$/.test(value)))throw new Error('Invalid record ID');
  if(!valid(definition.inputSchema,args))throw new Error('Invalid tool arguments');
+ if(name==='psa_upload_pdf_file')return uploadPdfFileReference(request,args);
  const body={...args};
  const pathFields={psa_school:'school_id',psa_update_school:'school_id',psa_log_activity:'school_id',psa_update_task:'task_id',psa_outreach_batch:'batch_id',psa_cancel_outreach:'batch_id',psa_cancel_enrollment:'enrollment_id',psa_school_contacts:'school_id',psa_import_commit:'import_id',psa_outreach_draft:'draft_id',psa_execute_approved_outreach:'draft_id',psa_reply_chain:'email_id',psa_campaign_plan:'plan_id',psa_campaign_summary:'plan_id',psa_stop_campaign:'plan_id'};
  if(pathFields[name])delete body[pathFields[name]];

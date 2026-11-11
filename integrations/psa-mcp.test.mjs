@@ -123,3 +123,53 @@ test('uploads exceed the old 64KB limit and replies stay preparation-only',async
  assert.equal(tools.find(t=>t.name==='psa_delete_schools').annotations.destructiveHint,true);
  assert.equal(tools.find(t=>t.name==='psa_find_schools').annotations.readOnlyHint,true);
 });
+
+
+test('local file reference uploads a 2.9 MB flyer without base64 in model arguments or results',async()=>{
+ const {mkdtemp,writeFile,rm}=await import('node:fs/promises');
+ const {tmpdir}=await import('node:os');const {join}=await import('node:path');const {createHash}=await import('node:crypto');
+ const folder=await mkdtemp(join(tmpdir(),'psa-pdf-ref-'));
+ const calls=[];
+ const request=async(method,path,body)=>{calls.push({method,path,body});if(path==='/me')return {admin:true,key:{capabilities:['library:manage']}};assert.equal(path,'/operations/psa_upload_pdf');return {id:createHash('sha256').update(Buffer.from(body.encoded,'base64')).digest('hex'),name:body.filename,bytes:Buffer.from(body.encoded,'base64').length};};
+ try{
+  const path=join(folder,'Sponsor flyer.pdf'),raw=Buffer.concat([Buffer.from('%PDF-1.4\n'),Buffer.alloc(2_900_000,65),Buffer.from('\n%%EOF')]);await writeFile(path,raw);
+  const preview=await callTool(request,'psa_upload_pdf_file',{file_path:path});
+  assert.equal(preview.confirmation_required,true);assert.equal(preview.bytes,raw.length);assert.ok(JSON.stringify(preview).length<1000);assert.equal(calls.filter(c=>c.method==='POST').length,0);
+  await assert.rejects(callTool(request,'psa_upload_pdf_file',{file_path:path,confirm:true}),/Preview/);
+  const saved=await callTool(request,'psa_upload_pdf_file',{file_path:path,confirm:true,expected_sha256:preview.expected_sha256});
+  assert.equal(saved.id,createHash('sha256').update(raw).digest('hex'));assert.equal(saved.bytes,raw.length);assert.ok(!Object.hasOwn(saved,'encoded'));assert.equal(calls.filter(c=>c.method==='POST').length,1);
+  await writeFile(path,'%PDF-1.4\nChanged\n%%EOF');
+  await assert.rejects(callTool(request,'psa_upload_pdf_file',{file_path:path,confirm:true,expected_sha256:preview.expected_sha256}),/changed after review/);
+  assert.equal(calls.filter(c=>c.method==='POST').length,1);
+ }finally{await cleanPdfFixture(folder);}
+});
+
+test('file reference rejects unsupported paths, non-PDFs, oversize files and unprivileged keys',async()=>{
+ const {mkdtemp,writeFile,truncate,mkdir,rm}=await import('node:fs/promises');const {tmpdir}=await import('node:os');const {join}=await import('node:path');
+ const folder=await mkdtemp(join(tmpdir(),'psa-pdf-invalid-'));
+ const request=async()=>({admin:true,key:{capabilities:['library:manage']}});
+ try{
+  const path=join(folder,'Bad.pdf');await writeFile(path,'Not a PDF');await mkdir(join(folder,'Folder.pdf'));
+  for(const value of ['relative.pdf','https://evil.test/a.pdf',path,join(folder,'Missing.pdf'),join(folder,'Folder.pdf')])await assert.rejects(callTool(request,'psa_upload_pdf_file',{file_path:value}));
+  await writeFile(path,'%PDF-');await truncate(path,10*1024*1024+1);
+  await assert.rejects(callTool(request,'psa_upload_pdf_file',{file_path:path}),/10 MB/);
+  await assert.rejects(callTool(async()=>({admin:false,key:{capabilities:['library:manage']}}),'psa_upload_pdf_file',{file_path:join(folder,'Missing.pdf')}),/administrator/);
+  await assert.rejects(callTool(async()=>({admin:true,key:{capabilities:[]}}),'psa_upload_pdf_file',{file_path:join(folder,'Missing.pdf')}),/library:manage/);
+ }finally{await cleanPdfFixture(folder);}
+});
+
+test('file reference rejects a linked parent directory',async()=>{
+ const {mkdtemp,mkdir,writeFile,symlink,rm}=await import('node:fs/promises');const {tmpdir}=await import('node:os');const {join}=await import('node:path');
+ const folder=await mkdtemp(join(tmpdir(),'psa-pdf-links-'));
+ try{
+  const target=join(folder,'target'),link=join(folder,'linked');await mkdir(target);await writeFile(join(target,'Flyer.pdf'),'%PDF-1.4\n%%EOF');
+  await symlink(target,link,process.platform==='win32'?'junction':'dir');
+  await assert.rejects(callTool(async()=>({admin:true,key:{capabilities:['library:manage']}}),'psa_upload_pdf_file',{file_path:join(link,'Flyer.pdf')}),/symlinks/);
+ }finally{await cleanPdfFixture(folder);}
+});
+
+async function cleanPdfFixture(folder){
+ const {resolve,dirname,basename}=await import('node:path');const {tmpdir}=await import('node:os');const {rm}=await import('node:fs/promises');
+ const resolved=resolve(folder);assert.equal(dirname(resolved),resolve(tmpdir()));assert.ok(basename(resolved).startsWith('psa-pdf-'));
+ await rm(resolved,{recursive:true,force:true});
+}
