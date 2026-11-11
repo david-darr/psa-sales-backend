@@ -88,3 +88,9 @@ node --test integrations/psa-mcp.test.mjs
 3. Merge the frontend branch `feature/agent-keys-settings` (repo `psa-sales-frontend`) and deploy Vercel.
 4. Smoke test with a read key: `GET /me`, `GET /pipeline`, `GET /tasks`. Then a write key on a test school. Revoke test keys afterward.
 5. Audit retention: rows stay until removed. Suggested monthly cleanup: `DELETE FROM agent_api_audit WHERE created_at < now() - interval '90 days';`
+
+
+## Full access for the employee role
+New website connections default to Full access for my PSA role. POST /api/agent-keys accepts scope `full` (also the default when omitted), expanding to CRM read/write and the capabilities allowed by the authenticated employee role. Custom `read` and `write` retain their previous restricted behavior. No AI connection can approve sending, delegate keys or access private credentials.
+
+An owner can upgrade an active existing key through the private signed-in endpoint POST /api/agent-keys/{id}/full-access with `{ "confirm_full_access": true }`. This preserves the key hash, ID and expiry, so existing AI integrations need no new secret. Expired/revoked keys cannot be revived, and API-key authentication cannot access this endpoint. PSA Command full-access sign-in performs this owner action for an existing connection. Current admin status and record ownership are checked on every API request; demotion immediately blocks admin actions. Promotion may require refreshing full access to include newly available capabilities.

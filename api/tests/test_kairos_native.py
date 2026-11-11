@@ -221,3 +221,29 @@ class KairosNativeTests(OutreachBase):
         stopped=catalog.call_tool('psa_stop_campaign',dict(plan_id=draft['id'],revision=approved['revision'],action='cancel',confirm=True),self.agent())
         self.assertEqual(stopped['status'],'cancelled')
         self.assertEqual(self.fake.sent,[])
+
+    def test_full_access_preset_grants_admin_read_write_and_all_capabilities(self):
+        self.owner.admin=True;svc.db.session.commit()
+        result=self.connect(scope='full',capabilities=[],confirm_send=False)
+        key=svc.AgentApiKey.query.one()
+        self.assertEqual(set(key.scopes.split(',')),{'read','write',*native.CAPABILITIES})
+        self.assertEqual(set(result['capabilities']),set(native.CAPABILITIES))
+        self.assertEqual(self.agent()['psa'].request('GET','/me')['key']['scope'],'write')
+        self.assertEqual(self.fake.sent,[])
+
+    def test_full_access_preset_uses_rep_role_not_requested_admin_capabilities(self):
+        self.connect(scope='full',capabilities=list(native.CAPABILITIES),confirm_send=False)
+        scopes=set(svc.AgentApiKey.query.one().scopes.split(','))
+        self.assertTrue({'read','write','outreach:send','schools:import'} <= scopes)
+        self.assertFalse(scopes & {'library:manage','commissions:manage','team:manage'})
+        with self.assertRaises(catalog.ApiError):self.agent()['psa'].request('GET','/team')
+        self.assertEqual(self.fake.sent,[])
+
+    def test_explicit_full_access_reconnect_upgrades_same_key_and_existing_chat(self):
+        self.connect(scope='read',capabilities=[],confirm_send=False)
+        old=svc.AgentApiKey.query.one().key_hash
+        chat=self.agent()
+        self.connect(scope='full',capabilities=[],confirm_send=False,create_key=False)
+        self.assertEqual(svc.AgentApiKey.query.count(),1)
+        self.assertEqual(svc.AgentApiKey.query.one().key_hash,old)
+        self.assertEqual(chat['psa'].request('GET','/me')['key']['scope'],'write')

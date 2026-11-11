@@ -13,7 +13,7 @@ can be revoked. Every request is audited (key, employee, route, status) without
 request or response content. The audit table also backs the per-key rate limit,
 so the limit holds across worker processes.
 
-New outreach permissions are opt-in and require a separate human batch approval.
+Full-role connections include approved outreach execution, never human approval itself.
 """
 
 import hashlib
@@ -113,14 +113,17 @@ def register_agent_api(app, db, User, utc_now):
             name = data.get('name')
             if not isinstance(name, str) or not 1 <= len(name.strip()) <= 80:
                 return jsonify(error='Enter a key name under 80 characters'), 400
-            if not isinstance(data.get('scope'),str) or data.get('scope') not in SCOPES:
-                return jsonify(error='Choose read or write access'), 400
+            scope=data.get('scope','full')
+            if not isinstance(scope,str) or scope not in (*SCOPES,'full'):
+                return jsonify(error='Choose full, read or write access'), 400
             if data.get('expires_in_days') not in EXPIRY_DAYS or type(data.get('expires_in_days')) is not int:
                 return jsonify(error='Choose an expiry of 7, 30 or 90 days'), 400
             capabilities=data.get('capabilities',[])
             if not isinstance(capabilities,list) or len(capabilities)>len(CAPABILITIES) or any(c not in CAPABILITIES for c in capabilities):
                 return jsonify(error='Choose valid additional permissions'),400
-            if 'outreach:send' in capabilities and data.get('confirm_send') is not True:
+            if scope == 'full':
+                capabilities=[cap for cap in CAPABILITIES if user.admin or not cap.endswith(':manage')]
+            if scope != 'full' and 'outreach:send' in capabilities and data.get('confirm_send') is not True:
                 return jsonify(error='Explicitly delegate execution of human-approved batches'),400
             if not user.admin and set(capabilities) & {'library:manage','commissions:manage','team:manage'}:
                 return jsonify(error='Only administrators can delegate library, commission or team management'),403
@@ -131,13 +134,35 @@ def register_agent_api(app, db, User, utc_now):
                 return jsonify(error=f'You can have up to {MAX_ACTIVE_KEYS} active keys. Revoke one first.'), 400
             token = KEY_PREFIX + secrets.token_hex(32)
             key = AgentApiKey(user_id=user.id, name=name.strip(), key_hash=hash_key(token),
-                              key_hint=token[:9] + '...' + token[-4:], scopes=','.join([SCOPES[data['scope']],*sorted(set(capabilities))]),
+                              key_hint=token[:9] + '...' + token[-4:], scopes=','.join([SCOPES['write' if scope=='full' else scope],*sorted(set(capabilities))]),
                               expires_at=utc_now() + timedelta(days=data['expires_in_days']))
             db.session.add(key)
             db.session.commit()
             # The only time the full key is returned. It is never stored or logged.
             return jsonify(key=token, **key_dict(key)), 201
         except (ProgrammingError, OperationalError, IntegrityError):
+            return unavailable()
+
+    @app.post('/api/agent-keys/<int:key_id>/full-access')
+    @jwt_required()
+    def upgrade_agent_key_access(key_id):
+        """Private owner action; preserve the key, expiry and existing chat connection."""
+        if not enabled():
+            return jsonify(error='AI integrations are turned off.'),503
+        user=db.session.get(User,int(get_jwt_identity()))
+        if not user:return jsonify(error='User not found'),404
+        if request.get_json(silent=True) != {'confirm_full_access':True}:
+            return jsonify(error='Confirm full access for your PSA role'),400
+        try:
+            key=AgentApiKey.query.filter_by(id=key_id,user_id=user.id).with_for_update().first()
+            if not key:return jsonify(error='Key not found'),404
+            if key.revoked_at is not None or key.expires_at <= utc_now():
+                return jsonify(error='Create a new connection; this key is inactive'),409
+            caps=[cap for cap in CAPABILITIES if user.admin or not cap.endswith(':manage')]
+            key.scopes=','.join(['read','write',*sorted(caps)])
+            db.session.commit()
+            return jsonify(key_dict(key))
+        except (ProgrammingError,OperationalError,IntegrityError):
             return unavailable()
 
     @app.delete('/api/agent-keys/<int:key_id>')
@@ -186,6 +211,8 @@ def register_agent_api(app, db, User, utc_now):
             return key, user, (response, 429)
         if write and 'write' not in key.scopes.split(','):
             return key, user, (jsonify(error='This key is read-only'), 403)
+        if required_scope and required_scope.endswith(':manage') and not user.admin:
+            return key,user,(jsonify(error='Administrator access required'),403)
         if required_scope and required_scope not in key.scopes.split(','):
             return key,user,(jsonify(error=f'This key requires {required_scope} permission'),403)
         if request.content_length and request.content_length > body_limit:

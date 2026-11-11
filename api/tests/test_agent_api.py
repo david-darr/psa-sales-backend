@@ -228,6 +228,47 @@ class AgentApiTests(unittest.TestCase):
         with patch.dict(os.environ, {'AGENT_API_ENABLED': 'false'}):
             self.assertEqual(self.client.get(BASE + '/me', headers=self.bearer(key)).status_code, 503)
 
+    def test_full_access_default_and_explicit_preset_follow_authenticated_role(self):
+        for user in (self.rep,self.admin):
+            response=self.client.post('/api/agent-keys',headers=self.jwt(user),json=dict(name='Full role',expires_in_days=30))
+            self.assertEqual(response.status_code,201,response.get_json())
+            data=response.get_json()
+            self.assertEqual(data['scope'],'write')
+            expected={c for c in agent_api.CAPABILITIES if user.admin or not c.endswith(':manage')}
+            self.assertEqual(set(data['capabilities']),expected)
+            headers=self.bearer(data['key'])
+            team=self.client.get(BASE+'/team',headers=headers)
+            self.assertEqual(team.status_code,200 if user.admin else 403)
+        self.assertEqual(self.client.get(BASE+'/schools/'+str(self.theirs.id),headers=self.bearer(data['key'])).status_code,200)
+
+    def test_upgrade_preserves_key_identity_expiry_and_requires_owner_session(self):
+        created=self.create_key(self.rep)
+        row=service.db.session.get(service.AgentApiKey,created['id'])
+        original=(row.key_hash,row.expires_at)
+        url='/api/agent-keys/'+str(row.id)+'/full-access'
+        self.assertEqual(self.client.post(url,headers=self.bearer(created['key']),json={'confirm_full_access':True}).status_code,422)
+        self.assertEqual(self.client.post(url,headers=self.jwt(self.other),json={'confirm_full_access':True}).status_code,404)
+        self.assertEqual(self.client.post(url,headers=self.jwt(self.rep),json={}).status_code,400)
+        response=self.client.post(url,headers=self.jwt(self.rep),json={'confirm_full_access':True})
+        self.assertEqual(response.status_code,200,response.get_json())
+        self.assertNotIn('key',response.get_json())
+        service.db.session.refresh(row)
+        self.assertEqual((row.key_hash,row.expires_at),original)
+        self.assertIn('write',row.scopes.split(','))
+        self.assertFalse(set(row.scopes.split(',')) & {'team:manage','library:manage','commissions:manage'})
+        self.assertEqual(self.client.get(BASE+'/schools/'+str(self.theirs.id),headers=self.bearer(created['key'])).status_code,404)
+        self.assertEqual(self.client.post(url,headers=self.jwt(self.rep),json={'confirm_full_access':True}).status_code,200)
+        row.revoked_at=service.utc_now();service.db.session.commit()
+        self.assertEqual(self.client.post(url,headers=self.jwt(self.rep),json={'confirm_full_access':True}).status_code,409)
+
+    def test_admin_demotion_removes_admin_actions_from_previously_full_key(self):
+        response=self.client.post('/api/agent-keys',headers=self.jwt(self.admin),json=dict(name='Full',scope='full',expires_in_days=30))
+        headers=self.bearer(response.get_json()['key'])
+        self.admin.admin=False;service.db.session.commit()
+        self.assertEqual(self.client.get(BASE+'/team',headers=headers).status_code,403)
+        response=self.client.post(BASE+'/operations/psa_create_template',headers=headers,json={})
+        self.assertEqual(response.status_code,403,response.get_json())
+
 
 if __name__ == '__main__':
     unittest.main()
