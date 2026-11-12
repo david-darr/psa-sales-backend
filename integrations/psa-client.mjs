@@ -11,9 +11,12 @@ export function createPsaClient({url=process.env.PSA_API_URL,key=process.env.PSA
   // Paths are fixed by the bridge; never send the bearer token to a model-provided URL.
   if(path==='/outreach/reply-drafts'&&method!=='POST')throw new Error('Invalid API method');
   if(!(operations.get(path)===method)&&!/^\/outreach\/campaign-plans(?:\/[A-Za-z0-9_-]{1,100}(?:\/(?:summary|stop))?)?$/.test(path)&&!/^\/(me|team|pipeline|accounts|commissions|outreach(?:\/\d+|\/(?:templates|attachments|check-replies)|\/replies(?:\/\d+)?|\/drafts(?:\/[A-Za-z0-9_-]{1,100}(?:\/execute)?)?)?|imports\/(?:preview|[A-Za-z0-9_-]{1,100}\/commit)|tasks(?:\/\d+)?|schools(?:\/assign|\/\d+(?:\/(?:activities|contacts))?)?)$/.test(path)&&!/^\/outreach\/(?:\d+\/cancel|sequences|enrollments(?:\/\d+\/cancel)?)$/.test(path))throw new Error('Invalid API path');
+  let workspace=body?.workspace;
+  if(workspace!==undefined&&!['school','business'].includes(workspace))throw new Error('Choose school or business workspace');
+  if(method!=='GET'&&body&&Object.hasOwn(body,'workspace')){body={...body};delete body.workspace}
   const target=new URL(base.href.replace(/\/$/,'')+path);
   if(method==='GET'&&body)for(const [k,v] of Object.entries(body))if(v!==undefined&&v!==null)target.searchParams.set(k,String(v));
-  const response=await fetchImpl(target,{method,redirect:'error',headers:{Authorization:'Bearer '+key,'Content-Type':'application/json'},...(method!=='GET'?{body:JSON.stringify(body||{})}:{}),signal:AbortSignal.timeout(30000)});
+  const response=await fetchImpl(target,{method,redirect:'error',headers:{Authorization:'Bearer '+key,'Content-Type':'application/json',...(workspace?{'X-PSA-Workspace':workspace}:{})},...(method!=='GET'?{body:JSON.stringify(body||{})}:{}),signal:AbortSignal.timeout(30000)});
   let data;try{data=await response.json()}catch{data={}}
   if(!response.ok)throw new Error(`PSA Sales ${response.status}: ${data.error||'Request failed'}`);
   return data;

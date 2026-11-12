@@ -3,6 +3,7 @@
 Mailbox identity is shared; role/name/tags belong to a school association.
 Legacy email fields remain the sending projection in this release.
 """
+from .sales_workspaces import record_in_area
 import csv
 import hashlib
 import json
@@ -19,7 +20,7 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.orm import object_session
 
-ROLES = ('unknown', 'principal_ap', 'pta_pto', 'enrichment', 'other_staff')
+ROLES = ('unknown', 'principal_ap', 'pta_pto', 'enrichment', 'other_staff', 'decision_maker', 'marketing', 'community_relations')
 STAGES = ('pending', 'contacted', 'replied', 'meeting', 'partner', 'former', 'not_interested')
 ALIASES = {'principal': 'principal_ap', 'ap': 'principal_ap', 'principal/ap': 'principal_ap',
            'pta': 'pta_pto', 'pto': 'pta_pto', 'pta officer': 'pta_pto',
@@ -171,7 +172,7 @@ def register_contacts(app, db, User, School, Activity):
 
     def accessible(sid, user, lock=False):
         school = School.query.filter_by(id=sid).populate_existing().with_for_update().first() if lock else db.session.get(School, sid)
-        return school if school and user and (user.admin or school.user_id == user.id) else None
+        return school if record_in_area(school) and user and (user.admin or school.user_id == user.id) else None
 
     def blocked(address, independent=False, school_id=None):
         query=select(Contact.id).where(Contact.email == normalized(address))
@@ -552,7 +553,7 @@ def parse_tags(value):
 
 def column_name(value):
     key = (value or '').strip().casefold().replace(' ', '_').replace('-', '_')
-    return {'name': 'school_name', 'school': 'school_name', 'schoolname': 'school_name', 'email_address': 'email', 'e_mail': 'email',
+    return {'name': 'school_name', 'school': 'school_name', 'business_name': 'school_name', 'company_name': 'school_name', 'schoolname': 'school_name', 'email_address': 'email', 'e_mail': 'email',
         'school_email': 'email', 'contact_email': 'email', 'contact': 'contact_name', 'director': 'contact_name',
         'principal': 'contact_name', 'contactname': 'contact_name', 'type': 'school_type', 'category': 'school_type', 'schooltype': 'school_type',
         'status': 'stage', 'school_address': 'address', 'location': 'address', 'addr': 'address',
@@ -563,10 +564,12 @@ def parse_row(raw):
     name = text(raw.get('school_name', ''), 240, 'School name')
     if not name:
         raise ValueError('School name is required')
-    kind = normalized(raw.get('school_type', '')) or 'preschool'
+    from .sales_workspaces import requested_area
+    business = requested_area() == 'business'
+    kind = normalized(raw.get('school_type', '')) or ('business' if business else 'preschool')
     kind = {'elementary school': 'elementary', 'public school': 'elementary', 'daycare': 'preschool', 'private school': 'private'}.get(kind, kind)
     stage = normalized(raw.get('stage', ''))
-    if kind not in ('preschool', 'elementary', 'private') or (stage and stage not in STAGES):
+    if kind not in (('business',) if business else ('preschool', 'elementary', 'private')) or (stage and stage not in STAGES):
         raise ValueError('Invalid school type or stage')
     dnc = normalized(raw.get('do_not_contact', ''))
     if dnc not in ('', 'true', 'false', 'yes', 'no', '1', '0'):

@@ -174,7 +174,7 @@ def register_sequences(app, db, svc, out):
         contact = db.session.get(svc.Contact, enrollment.contact_id)
         link = db.session.get(svc.SchoolContact, snap['link_id'])
         if not original or original.responded: return 'Conversation replied or unavailable'
-        if not school or school.user_id != enrollment.user_id or school.ownership_version != snap['ownership_version']: return 'School owner changed'
+        if not school or school.sales_workspace != enrollment.sales_workspace or school.user_id != enrollment.user_id or school.ownership_version != snap['ownership_version']: return 'School owner changed'
         if school.status in STOP_STAGES: return 'School is no longer eligible'
         if not contact or contact.do_not_contact or (link and link.do_not_contact): return 'Contact suppressed'
         if not link or link.school_id != school.id or link.contact_id != contact.id or link.version != snap['link_version'] or contact.version != snap['contact_version']: return 'Contact details changed'
@@ -534,7 +534,7 @@ def register_sequences(app, db, svc, out):
                     stop(enrollment, 'This campaign step is already reserved or sent'); db.session.commit(); continue
             if out.OutreachRecipient.query.filter_by(email=json.loads(enrollment.snapshot)['email']).filter(out.OutreachRecipient.status.in_(('queued','sending'))).first(): step.status='waiting'; db.session.commit(); continue
             snap, content = json.loads(enrollment.snapshot), json.loads(step.content)
-            batch = out.OutreachBatch(user_id=uid, kind='sequence', campaign_id=enrollment.campaign_id,
+            batch = out.OutreachBatch(sales_workspace=enrollment.sales_workspace, user_id=uid, kind='sequence', campaign_id=enrollment.campaign_id,
                 status='queued', worker_token=str(uuid.uuid4()))
             db.session.add(batch); db.session.flush()
             recipient = out.OutreachRecipient(batch_id=batch.id, position=0, school_id=school_id, school_name=snap['school_name'], email=snap['email'],

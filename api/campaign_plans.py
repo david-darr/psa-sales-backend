@@ -343,7 +343,7 @@ def register_campaign_plans(app, db, svc, out):
                 if not row['followups']:member.status='done';continue
                 original=db.session.get(svc.SentEmail,recipient.sent_email_id)
                 cfg=snap['sequence'];settings=json.loads(plan.settings)
-                enrollment=svc.SequenceEnrollment(original_id=original.id,user_id=plan.user_id,school_id=row['school_id'],contact_id=row['contact_id'],sequence_id=settings['sequence_id'],revision=settings['sequence_revision'],campaign_id=snap['campaign']['id'],mode='automatic',
+                enrollment=svc.SequenceEnrollment(sales_workspace=plan.sales_workspace,original_id=original.id,user_id=plan.user_id,school_id=row['school_id'],contact_id=row['contact_id'],sequence_id=settings['sequence_id'],revision=settings['sequence_revision'],campaign_id=snap['campaign']['id'],mode='automatic',
                     snapshot=json.dumps(dict(school_name=row['school_name'],email=row['email'],link_id=row['contact_link_id'],link_version=row['signature']['link_version'],contact_version=row['signature']['contact_version'],ownership_version=row['signature']['owner_version'],definition=cfg)),
                     starts_at=datetime.fromisoformat(snap['starts_at'].rstrip('Z')),ends_at=datetime.fromisoformat(snap['ends_at'].rstrip('Z')))
                 db.session.add(enrollment);db.session.flush();member.enrollment_id=enrollment.id;original.sequence_managed=True
@@ -396,7 +396,7 @@ def register_campaign_plans(app, db, svc, out):
                 if row['followups'] and nominal_due(out.now(),max(item['day'] for item in row['followups']),snap['start_hour'],snap['end_hour'])>=datetime.fromisoformat(snap['ends_at'].rstrip('Z')):
                     member.status='skipped';member.reason='Not enough approved time for the follow-up sequence';continue
                 if not batch:
-                    batch=out.OutreachBatch(user_id=uid,kind='initial',campaign_id=snap['campaign']['id'],status='queued',worker_token=str(uuid.uuid4()),template_snapshot=json.dumps(snap['intro']));db.session.add(batch);db.session.flush()
+                    batch=out.OutreachBatch(sales_workspace=plan.sales_workspace,user_id=uid,kind='initial',campaign_id=snap['campaign']['id'],status='queued',worker_token=str(uuid.uuid4()),template_snapshot=json.dumps(snap['intro']));db.session.add(batch);db.session.flush()
                 recipient=out.OutreachRecipient(batch_id=batch.id,position=total,school_id=school.id,school_name=row['school_name'],email=row['email'],subject=row['subject'],body=row['body'],attachments=json.dumps(row['pdf_files']),status='queued',ownership_version=row['signature']['owner_version'],contact_id=contact.id,contact_link_id=link.id,contact_version=contact.version,link_version=link.version)
                 db.session.add(recipient);db.session.flush();member.recipient_id=recipient.id;member.status='queued'
                 if ledger:ledger.recipient_id=recipient.id

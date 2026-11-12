@@ -1,3 +1,4 @@
+from .sales_workspaces import across_sales_areas
 # =============================================# IMPORTS & EXTERNAL LIBRARIES
 # =============================================
 import os
@@ -83,7 +84,7 @@ CORS(app,
          "http://localhost:3000",
          "http://localhost:5173"
      ],
-     allow_headers=["Content-Type", "Authorization"],
+     allow_headers=["Content-Type", "Authorization", "X-PSA-Workspace"],
      methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"]
 )
 
@@ -615,6 +616,7 @@ def _reply_record(message, outbound_by_id, sent_by_address):
     )
 
 
+@across_sales_areas
 def sync_user_mailbox(user, max_messages=MAIL_SYNC_BATCH_LIMIT):
     """Advance one employee's durable IMAP UID cursor in a bounded batch."""
     state = MailSyncState.query.filter_by(user_id=user.id).with_for_update().first()
@@ -1335,6 +1337,11 @@ def school_dict(school):
     return {
         "id": school.id,
         "school_name": school.school_name,
+        "record_name": school.school_name,
+        "business_name": school.school_name if school.sales_workspace == "business" else None,
+        "sales_workspace": school.sales_workspace,
+        "industry": school.industry or "",
+        "sponsorship_value": str(school.sponsorship_value) if school.sponsorship_value is not None else None,
         "county": school.county or '',
         "contact_name": school.contact_name,
         "email": school.email,
@@ -1431,9 +1438,11 @@ def add_school():
     data = request.get_json(silent=True)
     if not isinstance(data, dict):
         return jsonify({"error": "A school record is required"}), 400
+    from .sales_workspaces import requested_area
+    business = requested_area() == 'business'
     # Leads from the finder come without an email; they can be saved and worked by phone/visit.
     from_finder = bool(data.get('place_id')) or data.get('source') == 'finder'
-    raw_email = data.get('email')
+    raw_email = data.get('email', '' if business else None)
     if from_finder and raw_email is None:
         raw_email = ''
     if not isinstance(data.get('school_name'), str) or not isinstance(raw_email, str):
@@ -1447,17 +1456,21 @@ def add_school():
     county = data.get('county', '')
     if not isinstance(county, str) or len(county) > 80:
         return jsonify(error='County must be text up to 80 characters'), 400
-    school_type = data.get("school_type", "preschool")
+    school_type = data.get("school_type", "business" if business else "preschool")
     place_id = data.get("place_id")
     lat, lng, website = data.get("lat"), data.get("lng"), data.get("website")
 
-    if not school_name or (not email and not from_finder):
+    for key, maximum in (('school_name',240),('contact_name',150),('address',500),('phone',80)):
+        value = data.get(key)
+        if value is not None and (not isinstance(value,str) or len(value)>maximum):
+            return jsonify(error=f'{key} must be text up to {maximum} characters'),400
+    if not school_name or (not email and not from_finder and not business):
         return jsonify({"error": "School name and email are required"}), 400
     if not isinstance(additional_emails, list) or any(
         not valid_email(item) for item in additional_emails
     ) or (email and not valid_email(email)):
         return jsonify({"error": "Enter valid school email addresses"}), 400
-    if school_type not in ['preschool', 'elementary', 'private']:
+    if school_type not in (['business'] if business else ['preschool', 'elementary', 'private']):
         return jsonify({"error": "Invalid school type"}), 400
     if place_id is not None and (not isinstance(place_id, str) or len(place_id) > 300):
         return jsonify({"error": "Invalid place identifier"}), 400
@@ -1496,7 +1509,11 @@ def add_school():
             "school_id": existing.id if existing.user_id == int(user_id) else None,
         }), 409
     
+    industry = data.get('industry', '')
+    if not isinstance(industry, str) or len(industry) > 100 or (industry and not business):
+        return jsonify(error='Industry must be business text up to 100 characters'), 400
     school = SalesSchool(
+        industry=industry.strip() or None,
         school_name=school_name,
         contact_name=contact_name,
         email=email,
@@ -1511,6 +1528,39 @@ def add_school():
         website=website,
     )
     
+    if business:
+        from decimal import Decimal, InvalidOperation
+        try:
+            raw_value = data.get('sponsorship_value')
+            amount = None if raw_value in (None, '') else Decimal(str(raw_value))
+            if amount is not None and (not amount.is_finite() or amount < 0 or amount > Decimal('9999999999.99') or amount.as_tuple().exponent < -2):
+                raise ValueError()
+        except (InvalidOperation, ValueError):
+            return jsonify(error='Enter a non-negative sponsorship amount with at most two decimal places'), 400
+        school.sponsorship_value = amount
+        owner = db.session.get(User, int(user_id))
+        target = data.get('user_id', int(user_id))
+        if target != int(user_id) and not owner.admin:
+            return jsonify(error='Only administrators can assign another owner'), 403
+        if target is not None and (type(target) is not int or not db.session.get(User, target)):
+            return jsonify(error='Employee not found'), 400
+        school.user_id = target
+        stage = data.get('status', 'pending')
+        if stage not in SCHOOL_STAGES:
+            return jsonify(error='Invalid sponsorship stage'), 400
+        set_school_status(school, stage, int(user_id))
+        for key in ('notes', 'next_action'):
+            value = data.get(key, '')
+            if not isinstance(value, str) or len(value) > (500 if key == 'next_action' else 20000):
+                return jsonify(error='Enter valid business notes and next action'), 400
+            setattr(school, key, value.strip())
+        try:
+            raw_date = data.get('next_action_at')
+            school.next_action_at = datetime.fromisoformat(raw_date.replace('Z', '+00:00')) if raw_date else None
+            if school.next_action_at and school.next_action_at.tzinfo:
+                school.next_action_at = school.next_action_at.astimezone(timezone.utc).replace(tzinfo=None)
+        except (ValueError, TypeError, AttributeError):
+            return jsonify(error='Invalid next action date'), 400
     # Set additional emails
     school.set_additional_emails(additional_emails)
     
@@ -1562,7 +1612,7 @@ def sales_school_workspace(school_id):
     allowed = {
         'school_name', 'contact_name', 'email', 'additional_emails', 'phone',
         'address', 'school_type', 'status', 'notes', 'next_action', 'next_action_at', 'user_id',
-        'website', 'county',
+        'website', 'county', 'industry', 'sponsorship_value',
     }
     if not isinstance(data, dict) or not data or any(key not in allowed for key in data):
         return jsonify({"error": "No valid school changes supplied"}), 400
@@ -1570,7 +1620,9 @@ def sales_school_workspace(school_id):
         return jsonify({"error": "Only an administrator can reassign schools"}), 403
     if 'status' in data and data['status'] not in SCHOOL_STAGES:
         return jsonify({"error": "Invalid school stage"}), 400
-    if 'school_type' in data and data['school_type'] not in ('preschool', 'elementary', 'private'):
+    from .sales_workspaces import requested_area
+    business = requested_area() == 'business'
+    if 'school_type' in data and data['school_type'] not in (('business',) if business else ('preschool', 'elementary', 'private')):
         return jsonify({"error": "Invalid school type"}), 400
     if 'additional_emails' in data and (
         not isinstance(data['additional_emails'], list)
@@ -1590,9 +1642,9 @@ def sales_school_workspace(school_id):
             return jsonify({"error": "Invalid next action date"}), 400
 
     for key in ('school_name', 'email'):
-        if key in data and (not isinstance(data[key], str) or not data[key].strip()):
+        if key in data and (not isinstance(data[key], str) or (not data[key].strip() and not (business and key == 'email'))):
             return jsonify({"error": f"{key.replace('_', ' ').title()} is required"}), 400
-    if 'email' in data and not valid_email(data['email']):
+    if 'email' in data and not (business and data['email'] == '') and not valid_email(data['email']):
         return jsonify({"error": "Enter a valid school email address"}), 400
     for key in ('school_name', 'contact_name', 'email', 'phone', 'address', 'notes', 'next_action', 'website', 'county'):
         if key in data and data[key] is not None and not isinstance(data[key], str):
@@ -1610,9 +1662,22 @@ def sales_school_workspace(school_id):
         if other:
             return jsonify({"error": f"School is already assigned to {(other.user.name if other.user else 'Unassigned')}"}), 409
 
+    if ('industry' in data or 'sponsorship_value' in data) and not business:
+        return jsonify(error='Sponsorship fields belong to Business Sales'), 400
+    if 'industry' in data and (not isinstance(data['industry'], str) or len(data['industry']) > 100):
+        return jsonify(error='Industry must be text up to 100 characters'), 400
+    if 'sponsorship_value' in data:
+        from decimal import Decimal, InvalidOperation
+        try:
+            amount = None if data['sponsorship_value'] in (None, '') else Decimal(str(data['sponsorship_value']))
+            if amount is not None and (not amount.is_finite() or amount < 0 or amount > Decimal('9999999999.99') or amount.as_tuple().exponent < -2):
+                raise ValueError()
+        except (InvalidOperation, ValueError):
+            return jsonify(error='Enter a non-negative sponsorship amount with at most two decimal places'), 400
+        data['sponsorship_value'] = amount
     changes = []
     for key in ('school_name', 'contact_name', 'email', 'phone', 'address', 'school_type',
-                'status', 'notes', 'next_action', 'website', 'county'):
+                'status', 'notes', 'next_action', 'website', 'county', 'industry', 'sponsorship_value'):
         if key in data:
             value = data[key].strip() if isinstance(data[key], str) else data[key]
             if key == 'status':
@@ -2812,6 +2877,9 @@ from .outreach_clock import register_outreach_clock  # noqa: E402
 register_outreach_clock(app, db, _sys.modules[__name__])
 from .mail_connectivity import register_mail_connectivity
 register_mail_connectivity(app)
+
+from .sales_workspaces import register_sales_workspaces
+register_sales_workspaces(app, db, _sys.modules[__name__])
 
 if __name__ == "__main__":
     with app.app_context():

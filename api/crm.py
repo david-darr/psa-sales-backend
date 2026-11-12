@@ -1,4 +1,5 @@
 """Bounded CRM queries and team workflows. All record access is scoped server-side."""
+from .sales_workspaces import record_in_area
 
 from datetime import datetime, timedelta, timezone
 
@@ -88,7 +89,7 @@ def register_crm_routes(app, db, User, School, SentEmail, Task, Activity, serial
             query = query.filter(func.lower(func.trim(School.county)) == county.casefold())
         kind = args.get('type')
         if kind:
-            if kind not in ('preschool', 'elementary', 'private'):
+            if kind not in ('preschool', 'elementary', 'private', 'business'):
                 raise ValueError('Invalid school type')
             query = query.filter(School.school_type == kind)
         term = args.get('q', '').strip().lower()[:120]
@@ -291,7 +292,7 @@ def register_crm_routes(app, db, User, School, SentEmail, Task, Activity, serial
             school_id = request.args.get('school_id', type=int)
             if school_id:
                 school = db.session.get(School, school_id)
-                if not school or (not user.admin and school.user_id != user.id):
+                if not record_in_area(school) or (not user.admin and school.user_id != user.id):
                     return jsonify(error='School not found'), 404
                 query = query.filter(Task.school_id == school_id)
             view = request.args.get('view', 'open')
@@ -327,7 +328,7 @@ def register_crm_routes(app, db, User, School, SentEmail, Task, Activity, serial
             if type(school_id) is not int:
                 return jsonify(error='Invalid school'), 400
             school = db.session.get(School, school_id)
-            if not school or (not user.admin and school.user_id != user.id):
+            if not record_in_area(school) or (not user.admin and school.user_id != user.id):
                 return jsonify(error='School not found'), 404
             if school.user_id != owner_id:
                 return jsonify(error='Assign the task to this school’s owner'), 400

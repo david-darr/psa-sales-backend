@@ -5,6 +5,18 @@ import {createPsaClient} from './psa-client.mjs';
 import {tools,callTool,handleMessage} from './psa-mcp.mjs';
 
 const KEY='psak_'+'a'.repeat(64);
+test('sales workspace travels per call without changing keys or request paths',async()=>{
+ const {calls,request}=fake();
+ await callTool(request,'psa_create_business',{business_name:'Coffee Sponsor',email:'sponsor@example.test',workspace:'business'});
+ await callTool(request,'psa_create_task',{title:'Call sponsor',workspace:'business'});
+ await callTool(request,'psa_schools',{});
+ assert.equal(calls[0].init.headers['X-PSA-Workspace'],'business');
+ assert.equal(calls[1].init.headers['X-PSA-Workspace'],'business');
+ assert.equal(calls[2].init.headers['X-PSA-Workspace'],undefined);
+ assert.equal(JSON.parse(calls[1].init.body).workspace,undefined);
+ assert.ok(calls.every(call=>call.init.headers.Authorization==='Bearer '+KEY));
+ await assert.rejects(callTool(request,'psa_schools',{workspace:'all'}),/Invalid tool arguments/);
+});
 function fake(status=200,data={ok:true}){
  const calls=[];
  const fetchImpl=async(url,init)=>{calls.push({url:String(url),init});return {ok:status<400,status,json:async()=>data}};

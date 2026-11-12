@@ -3,6 +3,7 @@
 No provider complaint feed is assumed. Only matched delivery reports and human
 replies enter here; arbitrary incoming mail never suppresses a contact.
 """
+from .sales_workspaces import across_sales_areas
 import hashlib
 import re
 
@@ -40,6 +41,7 @@ def register_mail_feedback(app, db, svc, out):
 
     svc.MailContactSignal = Signal
 
+    @across_sales_areas
     def record(address, kind, source, detail, actor_id=None, batch_id=None):
         identity = svc.Contact.query.filter_by(email=address.strip().casefold()).first()
         if identity is None: return False

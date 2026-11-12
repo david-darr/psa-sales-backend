@@ -1,4 +1,5 @@
 """School finder v2: parallel Places search, saved-school detection, details, batch save."""
+from .sales_workspaces import requested_area
 
 import base64
 import json
@@ -183,12 +184,13 @@ def register_finder_routes(app, db, SalesSchool, User, hooks):
         data = request.get_json(silent=True)
         if not isinstance(data, dict):
             return jsonify(error='Enter a search location'), 400
-        keywords, error = parse_keywords(data.get('keywords'))
+        business = requested_area() == 'business'
+        keywords, error = parse_keywords(data.get('keywords') if data.get('keywords') is not None else (['restaurant', 'local business'] if business else None))
         if error:
             return jsonify(error=error), 400
         types = data.get('types')
         if types in (None, []):
-            types = ['school']
+            types = ['establishment'] if business else ['school']
         if (not isinstance(types, list) or len(types) > MAX_TYPES
                 or any(not isinstance(item, str) or not _PLACE_TYPE.match(item) for item in types)):
             return jsonify(error='Choose up to 5 valid place types'), 400
@@ -212,14 +214,14 @@ def register_finder_routes(app, db, SalesSchool, User, hooks):
         token = None
         if raw_token:
             token = decode_page_token(raw_token)
-            if token is None:
-                return jsonify(error='Invalid page token'), 400
+            if token is None or token.get('area', 'school') != ('business' if business else 'school'):
+                return jsonify(error='Invalid page token for this sales workspace'), 400
         elif not have_point and not address:
             return jsonify(error='No address provided'), 400
 
         # Partner lists load on demand so a Sheets outage cannot stop the API at startup.
         try:
-            excluded_names = hooks.partner_names()
+            excluded_names = [] if business else hooks.partner_names()
         except Exception:
             app.logger.exception('Could not load partner schools for Finder')
             return jsonify(error='Partner school list is temporarily unavailable. Try again shortly.'), 503
@@ -255,7 +257,7 @@ def register_finder_routes(app, db, SalesSchool, User, hooks):
                 if place_id and place_id not in unique:
                     unique[place_id] = result
         next_tasks = [[item['keyword'], item['type'], item['next']] for item in succeeded if item.get('next')]
-        next_token = encode_page_token({'lat': lat, 'lng': lng, 'r': radius, 'label': label, 't': next_tasks}) \
+        next_token = encode_page_token({'area': 'business' if business else 'school', 'lat': lat, 'lng': lng, 'r': radius, 'label': label, 't': next_tasks}) \
             if next_tasks else None
 
         viewer = current_user()
@@ -374,8 +376,9 @@ def register_finder_routes(app, db, SalesSchool, User, hooks):
                 if not (valid_coordinate(lat, 90) and valid_coordinate(lng, 180)):
                     skipped.append({'place_id': place_id, 'reason': 'invalid'})
                     continue
-            school_type = item.get('school_type') or 'preschool'
-            if school_type not in SCHOOL_TYPES:
+            business = requested_area() == 'business'
+            school_type = item.get('school_type') or ('business' if business else 'preschool')
+            if school_type not in (('business',) if business else SCHOOL_TYPES):
                 skipped.append({'place_id': place_id, 'reason': 'invalid'})
                 continue
             raw_email = item.get('email')

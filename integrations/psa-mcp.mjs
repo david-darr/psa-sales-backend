@@ -28,6 +28,7 @@ export const tools=[pdfFileTool,...workflowTools,
  tool('psa_accounts','Administrators: closed-won accounts and pipeline counts by rep.',{scope}),
  tool('psa_commissions','Administrators: seasonal program commission records and rep/season totals.',{season:string,rep_id:id})
 ];
+for(const definition of tools)definition.inputSchema.properties.workspace={enum:['school','business']};
 const routes={psa_connection:['GET','/me'],psa_team:['GET','/team'],psa_pipeline:['GET','/pipeline'],psa_schools:['GET','/schools'],psa_school:['GET',a=>`/schools/${a.school_id}`],psa_update_school:['PATCH',a=>`/schools/${a.school_id}`],psa_assign_schools:['POST','/schools/assign'],psa_log_activity:['POST',a=>`/schools/${a.school_id}/activities`],psa_tasks:['GET','/tasks'],psa_create_task:['POST','/tasks'],psa_update_task:['PATCH',a=>`/tasks/${a.task_id}`],psa_outreach:['GET','/outreach'],psa_outreach_batch:['GET',a=>`/outreach/${a.batch_id}`],psa_accounts:['GET','/accounts'],psa_commissions:['GET','/commissions']};
 Object.assign(routes,workflowRoutes);
 Object.assign(routes,{psa_cancel_outreach:['POST',a=>`/outreach/${a.batch_id}/cancel`],psa_sequences:['GET','/outreach/sequences'],psa_enrollments:['GET','/outreach/enrollments'],psa_cancel_enrollment:['POST',a=>`/outreach/enrollments/${a.enrollment_id}/cancel`]});

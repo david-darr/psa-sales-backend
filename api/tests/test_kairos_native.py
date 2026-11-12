@@ -33,6 +33,30 @@ class Storage:
     def decrypt(self,value):return base64.b64decode(value.removeprefix('test-encrypted:')).decode()
 
 class KairosNativeTests(OutreachBase):
+    def test_native_business_work_uses_same_connection_and_role(self):
+        self.connect(scope='full')
+        before=dict(self.connections)
+        agent=self.agent()
+        preview=catalog.call_tool('psa_create_business',dict(business_name='Native Sponsor',email='native-sponsor@example.test'),agent)
+        self.assertTrue(preview['confirmation_required'])
+        saved=catalog.call_tool('psa_create_business',dict(business_name='Native Sponsor',email='native-sponsor@example.test',confirm=True),agent)
+        listed=catalog.call_tool('psa_businesses',{},self.agent())
+        self.assertEqual([r['id'] for r in listed['items']],[saved['id']])
+        self.assertEqual(catalog.call_tool('psa_schools',{},self.agent())['items'],[])
+        task=catalog.call_tool('psa_create_task',dict(title='Call sponsor',school_id=saved['id'],workspace='business',confirm=True),self.agent())
+        self.assertEqual(task['school_id'],saved['id'])
+        draft=catalog.call_tool('psa_prepare_outreach',dict(kind='custom',school_ids=[saved['id']],subject='For [business_name]',body='A sponsorship conversation',audience='all',workspace='business',confirm=True),self.agent())
+        with self.assertRaises(catalog.ApiError):
+            self.native.request('chris','GET','/api/agent-outreach-drafts/'+draft['id'])
+        approved=self.native.request('chris','POST','/api/agent-outreach-drafts/'+draft['id']+'/approve',{'revision':draft['revision']},params={'workspace':'business'})
+        self.assertEqual(approved['status'],'approved')
+        queued=catalog.call_tool('psa_execute_approved_outreach',dict(draft_id=draft['id'],workspace='business',confirm=True),self.agent())
+        batch=svc.db.session.get(outreach.OutreachBatch,queued['batch_id'])
+        self.assertEqual(batch.sales_workspace,'business')
+        outreach.run_batch(svc.app,batch.id,batch.worker_token,delay=0)
+        self.assertEqual(self.fake.sent,['native-sponsor@example.test'])
+        self.assertEqual(self.connections,before)
+
     def test_business_catalog_upload_and_permissions_from_fresh_chats(self):
         self.owner.admin=True;svc.db.session.commit()
         self.connect(capabilities=['outreach:read','library:manage'])

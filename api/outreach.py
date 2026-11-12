@@ -9,6 +9,7 @@ batch that stops making progress is reported as ``stalled`` and can be retried.
 Message rendering, SentEmail / SentMessage logging and the SMTP helpers are the
 existing ones in api.py; this module only orchestrates them.
 """
+from .sales_workspaces import across_sales_areas, requested_area
 import json
 import logging
 import os
@@ -186,11 +187,13 @@ def apply_vars(text, school, user):
     """The same [placeholder] substitution the custom-email endpoints use."""
     return (text
             .replace('[school_name]', school.school_name or '')
+            .replace('[business_name]', school.school_name or '')
             .replace('[contact_name]', school.contact_name or 'Director/Administrator')
             .replace('[user_name]', user.name or '')
             .replace('[user_email]', user.email or ''))
 
 
+@across_sales_areas
 def sent_today(user_id):
     """Outbound sends today (UTC) from this user's mailbox: outreach rows plus follow-ups/replies."""
     start = day_start()
@@ -211,6 +214,7 @@ def sent_today(user_id):
     return outreach + other + tests + uncertain + legacy_uncertain
 
 
+@across_sales_areas
 def uncertain_attempts(user_id, campaign_id=None):
     query = db.session.query(func.count(OutreachAttempt.id)).join(OutreachRecipient).join(OutreachBatch).filter(
         OutreachBatch.user_id == user_id, OutreachAttempt.started_at >= day_start(),
@@ -220,6 +224,7 @@ def uncertain_attempts(user_id, campaign_id=None):
     return query.scalar() or 0
 
 
+@across_sales_areas
 def reserved_count(user_id):
     """Recipients already promised to live batches, so two batches cannot overshoot the limit."""
     return db.session.query(func.count(OutreachRecipient.id)).join(
@@ -230,6 +235,7 @@ def reserved_count(user_id):
         OutreachRecipient.status.in_(('queued', 'sending'))).scalar() or 0
 
 
+@across_sales_areas
 def campaign_used(user_id, campaign_id, include_reservations=True):
     actual = or_(and_(OutreachRecipient.status == 'sent', OutreachRecipient.sent_at >= day_start()),
                  and_(OutreachRecipient.status == 'unconfirmed',
@@ -314,6 +320,7 @@ def chosen_email(school, latest, kind):
     return (school.email or '').strip().casefold()
 
 
+@across_sales_areas
 def in_flight_school_ids(school_ids):
     """Schools that already have an email waiting or being sent in an unfinished batch."""
     school_ids = list(school_ids)
@@ -420,6 +427,8 @@ def parse_request_options(data, max_schools, preview_limit=MAX_PREVIEW_SCHOOLS):
             or any(type(value) is not int or value < 1 for value in ids)):
         return None, (jsonify(error=f'Select between 1 and {max_schools} schools'), 400)
     kind = data.get('kind')
+    if requested_area() == 'business' and kind in ('initial', 'followup') and not data.get('template_id') and not (data.get('subject') and data.get('body')):
+        return None, (jsonify(error='Choose a Business Sales template or write a custom sponsorship message'), 400)
     if kind not in KINDS:
         return None, (jsonify(error="Choose a kind: 'initial', 'followup' or 'custom'"), 400)
     subject, body, attachments = data.get('subject'), data.get('body'), data.get('attachments')
@@ -605,7 +614,7 @@ def _process_batch(batch_id, token, delay, max_recipients=None):
         return
     sender = svc.SmtpSender(user.email, password, user.name)
     # Plain values: the session is rolled back around every send, which would otherwise reload these rows each time.
-    batch_ctx = SimpleNamespace(id=batch.id, kind=batch.kind, user_id=batch.user_id, campaign_id=batch.campaign_id)
+    batch_ctx = SimpleNamespace(id=batch.id, kind=batch.kind, user_id=batch.user_id, campaign_id=batch.campaign_id, sales_workspace=batch.sales_workspace)
     user_id = user.id
     quota = {'sent': None, 'since_check': 0}
     pause = False
@@ -744,6 +753,8 @@ def skip_reason(batch, recipient, school):
             return 'contact_changed'
     if school is None:
         return 'school_deleted'
+    if school.sales_workspace != getattr(batch, 'sales_workspace', 'school'):
+        return 'workspace_changed'
     if school.user_id != batch.user_id:
         return 'not_owner'
     saved_owner_version = getattr(recipient, 'ownership_version', None)

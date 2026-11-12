@@ -232,7 +232,7 @@ def register_agent_api(app, db, User, utc_now):
             db.session.rollback()
             app.logger.warning('Agent API audit write failed for key %s', key.id)
 
-    def delegate(endpoint, user, *, method='GET', args=None, body=None, view_args=None, files=None):
+    def delegate(endpoint, user, *, method='GET', args=None, body=None, view_args=None, files=None, workspace=None):
         """Run a web-app handler as this employee and return (payload, status)."""
         view = app.view_functions.get(endpoint)
         if view is None:
@@ -242,8 +242,10 @@ def register_agent_api(app, db, User, utc_now):
         query = {name: value for name, value in (args or {}).items() if value is not None}
         content = {'data':files, 'content_type':'multipart/form-data'} if files else {'json':body if method!='GET' else None}
         with app.test_request_context(request.path, method=method, query_string=query,
-                                      **content, headers={'Authorization': 'Bearer ' + token}):
-            response = app.make_response(view(**(view_args or {})))
+                                      **content, headers={'Authorization': 'Bearer ' + token, 'X-PSA-Workspace': workspace or request.headers.get('X-PSA-Workspace') or request.args.get('workspace') or 'school'}):
+            from .sales_workspaces import sales_area_error
+            error = sales_area_error(endpoint)
+            response = app.make_response(error if error is not None else view(**(view_args or {})))
         return response.get_json(silent=True), response.status_code
 
     def agent_route(rule, methods, name, write=False, required_scope=None, body_limit=MAX_BODY_BYTES):

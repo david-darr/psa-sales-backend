@@ -1,3 +1,4 @@
+from .sales_workspaces import across_sales_areas
 """Two-way sync of sales tasks with Taskbar (migration 20261030_taskbar_sync.sql).
 
 PSA to Taskbar: a per-process background worker pushes tasks whose ``version`` is ahead
@@ -540,6 +541,7 @@ def register_taskbar_sync(app, db, User, SalesTask, env=None, client=None):
         sync.ensure_started()
 
     @app.post('/api/integrations/taskbar/webhook')
+    @across_sales_areas
     def taskbar_webhook():
         if not sync.config.enabled:
             return jsonify(error='Taskbar sync is not enabled'), 503

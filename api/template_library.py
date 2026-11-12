@@ -1,4 +1,5 @@
 """Shared, versioned outreach copy. Saving a template never schedules or sends mail."""
+from .sales_workspaces import requested_area
 import base64
 import functools
 import hashlib
@@ -14,10 +15,10 @@ from flask_jwt_extended import jwt_required, get_jwt_identity
 from sqlalchemy import update
 from sqlalchemy.exc import IntegrityError
 
-FIELDS = {'school name': 'school_name', 'contact name': 'contact_name', 'my name': 'user_name', 'my email': 'user_email'}
+FIELDS = {'business name': 'business_name', 'school name': 'school_name', 'contact name': 'contact_name', 'my name': 'user_name', 'my email': 'user_email'}
 ALIASES = {value: key for key, value in FIELDS.items()}
 TOKEN = re.compile(r"\{([^{}]*)\}|\[([^\[\]\r\n]*)\]")
-AUDIENCES = {'principal_ap', 'pta_pto', 'enrichment', 'trunk_or_treat', 'general'}
+AUDIENCES = {'principal_ap', 'pta_pto', 'enrichment', 'trunk_or_treat', 'general', 'decision_maker', 'marketing', 'community_relations'}
 APPROVED_PDFS = ('PSA TOTS seasonal flyer.pdf', 'PSA TOTS year round flyer.pdf',
                  'PSA TOTS Recommendation (Primrose School).pdf', 'PSA After School.pdf',
                  'PSA Recommendation (St. Theresa).pdf', 'PSA Recommendation Letter (Madison Trust ES).pdf')
@@ -56,7 +57,7 @@ def validate_copy(subject, body):
 
 def render_copy(subject, body, school, user):
     validate_copy(subject, body)
-    values = {'school name': school.school_name, 'contact name': school.contact_name,
+    values = {'business name': school.school_name, 'school name': school.school_name, 'contact name': school.contact_name,
               'my name': user.name, 'my email': user.email}
     def replace(match):
         key = match[1] if match[1] is not None else ALIASES[match[2]]
@@ -469,6 +470,8 @@ def register_templates(app, db, User):
     @app.post('/api/outreach/templates/seed-winter-2027')
     @jwt_required()
     def template_seed():
+        if requested_area() == 'business':
+            return jsonify(error='Winter school templates are only available in School Sales. Create a sponsorship template here.'),400
         actor = user()
         if not actor or not actor.admin:
             return jsonify(error='Admin access required'), 403

@@ -35,9 +35,9 @@ operation('psa_profile','Read your name, phone and mailbox connection status. Ne
 operation('psa_edit_profile','Update only the connected employee name or phone. Account credentials remain private.','crm_profile','PATCH',{'name':S,'phone':S},scope='write')
 operation('psa_bulk_school_stage','Change the stage of up to 100 accessible schools atomically. Review names and current stages first.','crm_bulk_schools','POST',{'ids':IDS,'status':{'enum':['pending','contacted','replied','meeting','partner','former','not_interested']}},['ids','status'],'write')
 operation('psa_create_school','Add a school with duplicate protection. Use contact import for multi-contact lists.','add_school','POST',
-    {**{k:S for k in ('school_name','email','contact_name','phone','address','school_type','website','county')},'additional_emails':STRINGS,'shared_contact_confirmed':BOOL},['school_name','email','school_type'],'write')
+    {**{k:S for k in ('school_name','email','contact_name','phone','address','school_type','website','county','industry')},'additional_emails':STRINGS,'shared_contact_confirmed':BOOL},['school_name','email','school_type'],'write')
 operation('psa_edit_school','Edit school details, stage, county, notes or next action using normal school access rules.','sales_school_workspace','PATCH',
-    {**{k:S for k in ('school_name','email','contact_name','phone','address','school_type','website','county','status','notes','next_action','next_action_at')},'school_id':ID,'user_id':NULL_ID,'additional_emails':STRINGS},['school_id'],'write',params={'school_id':'school_id'})
+    {**{k:S for k in ('school_name','email','contact_name','phone','address','school_type','website','county','status','notes','next_action','next_action_at','industry','sponsorship_value')},'school_id':ID,'user_id':NULL_ID,'additional_emails':STRINGS},['school_id'],'write',params={'school_id':'school_id'})
 operation('psa_delete_schools','Permanently delete selected owned schools. Review IDs and names first. Sent history is retained.','crm_delete_schools','POST',{'ids':IDS},['ids'],'write')
 operation('psa_add_contact','Add a role-based school contact. School-specific suppression is separate from global mailbox opt-outs.','school_contacts','POST',{'school_id':ID,**CONTACT},['school_id','email'],'write',params={'school_id':'sid'})
 operation('psa_edit_contact','Edit a linked contact using current link and contact versions. Only admins may lift suppression.','patch_contact','PATCH',{'school_id':ID,'link_id':ID,'version':ID,'contact_version':ID,**{k:v for k,v in CONTACT.items() if k!='email'}},['school_id','link_id','version','contact_version'],'write',params={'school_id':'sid','link_id':'lid'})
@@ -79,6 +79,18 @@ operation('psa_create_join_link','Admin: create an employee join link with expli
 operation('psa_revoke_join_link','Admin: revoke one employee join link.','revoke_join_link','DELETE',{'link_id':ID},['link_id'],'team:manage',True,{'link_id':'link_id'})
 
 
+
+operation('psa_businesses', 'Search Business Sales prospects and sponsors. Employee ownership rules apply.', 'crm_schools', properties={k:S for k in ('q','stage','owner','county','scope','page','limit')})
+operation('psa_business', 'Read one Business Sales prospect, notes and conversation timeline.', 'sales_school_workspace', properties={'school_id':ID}, required=['school_id'], params={'school_id':'school_id'})
+
+
+operation('psa_create_business', 'Add a Business Sales prospect with duplicate checks. Never sends email.', 'add_school','POST', {**{k:S for k in ('business_name','email','contact_name','phone','address','website','county','industry')},'shared_contact_confirmed':BOOL},['business_name','email'],'write')
+operation('psa_edit_business', 'Edit business details, sponsorship value, stage, notes, next action or owner (admin only).', 'sales_school_workspace','PATCH', {**{k:S for k in ('business_name','email','contact_name','phone','address','website','county','industry','sponsorship_value','status','notes','next_action','next_action_at')},'business_id':ID,'user_id':NULL_ID},['business_id'],'write',params={'business_id':'school_id'})
+
+# Every operation can select a sales area without granting extra role permissions.
+for _operation in OPERATIONS:
+    _operation['properties']['workspace'] = {'enum': ['school', 'business']}
+
 def valid(schema, value):
     if 'anyOf' in schema:return any(valid(s,value) for s in schema['anyOf'])
     if 'enum' in schema:return value in schema['enum'] and not (isinstance(value,bool) and all(type(v) is int for v in schema['enum']))
@@ -115,8 +127,12 @@ def register_agent_operations(app, route, delegate):
         data=request.get_json(silent=True)
         if not isinstance(data,dict) or set(data)-set(op['properties']) or set(op['required'])-set(data) or any(not valid(op['properties'][k],v) for k,v in data.items()):
             return dict(error='Supply only the documented operation fields'),400
+        workspace=data.pop('workspace', 'business' if name in ('psa_businesses','psa_business','psa_create_business','psa_edit_business') else None)
         params={target:data[key] for key,target in op['params'].items()}
         body={k:v for k,v in data.items() if k not in op['params']}
+        if name in ('psa_create_business','psa_edit_business'):
+            if 'business_name' in body: body['school_name']=body.pop('business_name')
+            if name == 'psa_create_business': body['school_type']='business'
         if op['upload']:
             filename,encoded=body['filename'],body['encoded']
             pdf=name=='psa_upload_pdf';limit=10*1024*1024 if pdf else 1024*1024
@@ -125,6 +141,6 @@ def register_agent_operations(app, route, delegate):
             try:raw=base64.b64decode(encoded,validate=True)
             except (ValueError,binascii.Error):return dict(error='Invalid upload encoding'),400
             if len(raw)>limit or (pdf and not raw.startswith(b'%PDF-')):return dict(error='Invalid or oversized file'),400
-            return delegate(op['endpoint'],user,method='POST',files={'file':(io.BytesIO(raw),filename,'application/pdf' if pdf else 'application/json')})
-        return delegate(op['endpoint'],user,method=op['method'],view_args=params,
+            return delegate(op['endpoint'],user,method='POST',files={'file':(io.BytesIO(raw),filename,'application/pdf' if pdf else 'application/json')},workspace=workspace)
+        return delegate(op['endpoint'],user,method=op['method'],view_args=params, workspace=workspace,
             **({'args':body} if op['method']=='GET' else {'body':body}))

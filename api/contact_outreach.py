@@ -1,3 +1,4 @@
+from .sales_workspaces import all_sales_areas
 """Reviewed, contact-targeted outreach. No SMTP or scheduler lives here.
 
 The canonical mailbox row is the cross-rep serialization lock. A unique ledger
@@ -14,7 +15,7 @@ from flask import jsonify, request, current_app
 from flask_jwt_extended import jwt_required
 from sqlalchemy import func, select
 
-AUDIENCES = ('all', 'principal_ap', 'pta_pto', 'enrichment', 'trunk_or_treat')
+AUDIENCES = ('all', 'principal_ap', 'pta_pto', 'enrichment', 'trunk_or_treat', 'decision_maker', 'marketing', 'community_relations')
 
 
 def digest(value):
@@ -88,8 +89,9 @@ def register_contact_outreach(app, db, svc, out):
         if len(grouped) > max_contacts:
             raise ValueError(f'Review at most {max_contacts} contact mailboxes. Select fewer schools.')
         addresses = [links[0][1].email for links in grouped.values()]
-        originals = svc.SentEmail.query.filter(func.lower(func.trim(svc.SentEmail.school_email)).in_(addresses)).order_by(
-            svc.SentEmail.sent_at.desc(), svc.SentEmail.id.desc()).all()
+        with all_sales_areas():
+            originals = svc.SentEmail.query.filter(func.lower(func.trim(svc.SentEmail.school_email)).in_(addresses)).order_by(
+                svc.SentEmail.sent_at.desc(), svc.SentEmail.id.desc()).all()
         latest_mine, history = {}, {}
         for original in originals:
             address = original.school_email.strip().casefold()

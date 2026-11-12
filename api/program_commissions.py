@@ -4,6 +4,7 @@ Policy source: Christopher's email, 2026-10-28. Rep payout is explicit: the
 email defines the pool but does not prescribe individual rep payout rates.
 All arithmetic uses decimal cents and ROUND_HALF_UP, never binary floats.
 """
+from .sales_workspaces import record_in_area, requested_area
 import csv
 import json
 from datetime import datetime, timezone
@@ -92,7 +93,7 @@ def register_program_commissions(app, db, User, School):
 
     def admin():
         user = db.session.get(User, int(get_jwt_identity()))
-        return user if user and user.admin else None
+        return user if user and user.admin and requested_area() != 'business' else None
 
     def serialize(row):
         values = calculate(row.gross, row.leagueapps, row.cash_expenses, row.sale_type, row.rep_payout)
@@ -176,7 +177,7 @@ def register_program_commissions(app, db, User, School):
                 raise ValueError('The school cannot be changed on an existing program record')
             school = None
             if not row:
-                if type(data.get('sales_school_id')) is not int or not (school := db.session.get(School, data['sales_school_id'])):
+                if type(data.get('sales_school_id')) is not int or not record_in_area(school := db.session.get(School, data['sales_school_id'])) or school.sales_workspace != 'school':
                     raise ValueError('Choose an existing school')
             values = calculate(data.get('gross'), data.get('leagueapps'), data.get('cash_expenses'), data.get('sale_type'), data.get('rep_payout'))
             notes = data.get('notes', '')
