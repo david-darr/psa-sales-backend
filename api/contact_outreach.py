@@ -222,7 +222,7 @@ def register_contact_outreach(app, db, svc, out):
             return dict(error='No eligible contacts. Resolve the warnings before sending.'), 400, None
         if len(eligible) > remaining:
             return dict(error=f'Only {remaining} emails remain within your mailbox and campaign limits.', code='daily_limit'), 429, None
-        batch = out.OutreachBatch(user_id=user.id, kind=options['kind'], status='queued', campaign_id=cam['id'],
+        batch = out.OutreachBatch(user_id=user.id, kind=options['kind'], status='queued', campaign_id=cam['id'],audience=data.get('audience','all'),
                                   subject=options['subject'], worker_token=str(uuid.uuid4()),
                                   template_snapshot=json.dumps(options['template']) if options.get('template') else None)
         db.session.add(batch)

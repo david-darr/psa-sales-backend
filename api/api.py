@@ -2878,6 +2878,10 @@ register_outreach_clock(app, db, _sys.modules[__name__])
 from .mail_connectivity import register_mail_connectivity
 register_mail_connectivity(app)
 
+from .record_quality import register_record_quality
+register_record_quality(app,db,_sys.modules[__name__])
+from .sales_reporting import register_sales_reporting
+register_sales_reporting(app,db,_sys.modules[__name__])
 from .sales_workspaces import register_sales_workspaces
 register_sales_workspaces(app, db, _sys.modules[__name__])
 

@@ -396,7 +396,7 @@ def register_campaign_plans(app, db, svc, out):
                 if row['followups'] and nominal_due(out.now(),max(item['day'] for item in row['followups']),snap['start_hour'],snap['end_hour'])>=datetime.fromisoformat(snap['ends_at'].rstrip('Z')):
                     member.status='skipped';member.reason='Not enough approved time for the follow-up sequence';continue
                 if not batch:
-                    batch=out.OutreachBatch(sales_workspace=plan.sales_workspace,user_id=uid,kind='initial',campaign_id=snap['campaign']['id'],status='queued',worker_token=str(uuid.uuid4()),template_snapshot=json.dumps(snap['intro']));db.session.add(batch);db.session.flush()
+                    batch=out.OutreachBatch(sales_workspace=plan.sales_workspace,user_id=uid,kind='initial',audience=json.loads(plan.settings).get('audience','all'),campaign_id=snap['campaign']['id'],status='queued',worker_token=str(uuid.uuid4()),template_snapshot=json.dumps(snap['intro']));db.session.add(batch);db.session.flush()
                 recipient=out.OutreachRecipient(batch_id=batch.id,position=total,school_id=school.id,school_name=row['school_name'],email=row['email'],subject=row['subject'],body=row['body'],attachments=json.dumps(row['pdf_files']),status='queued',ownership_version=row['signature']['owner_version'],contact_id=contact.id,contact_link_id=link.id,contact_version=contact.version,link_version=link.version)
                 db.session.add(recipient);db.session.flush();member.recipient_id=recipient.id;member.status='queued'
                 if ledger:ledger.recipient_id=recipient.id

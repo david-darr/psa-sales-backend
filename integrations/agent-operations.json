@@ -2326,6 +2326,210 @@
     "path": "/operations/psa_edit_business"
   },
   {
+    "name": "psa_record_duplicates",
+    "description": "Read possible duplicate profiles in the selected workspace. Shared mailboxes are warnings, not proof of duplication. Requires read.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "school_id": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "workspace": {
+          "enum": [
+            "school",
+            "business"
+          ]
+        }
+      },
+      "required": [
+        "school_id"
+      ],
+      "additionalProperties": false
+    },
+    "annotations": {
+      "readOnlyHint": true,
+      "destructiveHint": false,
+      "openWorldHint": false
+    },
+    "method": "POST",
+    "path": "/operations/psa_record_duplicates"
+  },
+  {
+    "name": "psa_preview_record_merge",
+    "description": "Admin: review merging a source profile into a retained profile. No records are changed. Returns an expiring review token. Requires write.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "source_id": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "target_id": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "workspace": {
+          "enum": [
+            "school",
+            "business"
+          ]
+        }
+      },
+      "required": [
+        "source_id",
+        "target_id"
+      ],
+      "additionalProperties": false
+    },
+    "annotations": {
+      "readOnlyHint": false,
+      "destructiveHint": false,
+      "openWorldHint": false
+    },
+    "method": "POST",
+    "path": "/operations/psa_preview_record_merge"
+  },
+  {
+    "name": "psa_commit_record_merge",
+    "description": "Admin: commit the exact reviewed profile merge with its review token. Source is removed; linked history and suppression are preserved. Active outreach or stale reviews block merging. Requires write.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "source_id": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "target_id": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "review_token": {
+          "type": "string",
+          "maxLength": 20000
+        },
+        "workspace": {
+          "enum": [
+            "school",
+            "business"
+          ]
+        }
+      },
+      "required": [
+        "source_id",
+        "target_id",
+        "review_token"
+      ],
+      "additionalProperties": false
+    },
+    "annotations": {
+      "readOnlyHint": false,
+      "destructiveHint": false,
+      "openWorldHint": false
+    },
+    "method": "POST",
+    "path": "/operations/psa_commit_record_merge"
+  },
+  {
+    "name": "psa_outreach_reporting",
+    "description": "Read sent-message totals, Eastern-day summaries and conversation reply rates by template and audience. Admins see the team; employees see their own workspace outreach. Does not send email. Requires read.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "start": {
+          "type": "string",
+          "maxLength": 20000
+        },
+        "end": {
+          "type": "string",
+          "maxLength": 20000
+        },
+        "workspace": {
+          "enum": [
+            "school",
+            "business"
+          ]
+        }
+      },
+      "required": [],
+      "additionalProperties": false
+    },
+    "annotations": {
+      "readOnlyHint": true,
+      "destructiveHint": false,
+      "openWorldHint": false
+    },
+    "method": "POST",
+    "path": "/operations/psa_outreach_reporting"
+  },
+  {
+    "name": "psa_taskbar_sync_status",
+    "description": "Admin: read Taskbar sync errors and retained tasks waiting for a matching sales account. Does not change tasks or create accounts. Requires read.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "workspace": {
+          "enum": [
+            "school",
+            "business"
+          ]
+        }
+      },
+      "required": [],
+      "additionalProperties": false
+    },
+    "annotations": {
+      "readOnlyHint": true,
+      "destructiveHint": false,
+      "openWorldHint": false
+    },
+    "method": "POST",
+    "path": "/operations/psa_taskbar_sync_status"
+  },
+  {
+    "name": "psa_update_task_priority",
+    "description": "Change an accessible sales task priority with its current version. Use low, normal or high; stale versions are rejected. Requires write.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "task_id": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "version": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "priority": {
+          "enum": [
+            "low",
+            "normal",
+            "high"
+          ]
+        },
+        "workspace": {
+          "enum": [
+            "school",
+            "business"
+          ]
+        }
+      },
+      "required": [
+        "task_id",
+        "version",
+        "priority"
+      ],
+      "additionalProperties": false
+    },
+    "annotations": {
+      "readOnlyHint": false,
+      "destructiveHint": false,
+      "openWorldHint": false
+    },
+    "method": "POST",
+    "path": "/operations/psa_update_task_priority"
+  },
+  {
     "name": "psa_capabilities",
     "description": "Check operation availability, delegated permissions and human-only controls for this connection.",
     "inputSchema": {

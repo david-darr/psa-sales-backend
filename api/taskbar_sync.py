@@ -73,11 +73,13 @@ def to_psa_status(taskbar_status):
 def to_taskbar_priority(psa_priority, last_remote=None):
     if psa_priority == 'high':
         return 'High'
-    return 'Low' if last_remote == 'Low' else 'Medium'
+    if psa_priority == 'low':
+        return 'Low'
+    return 'Medium'
 
 
 def to_psa_priority(taskbar_priority):
-    return 'high' if taskbar_priority == 'High' else 'normal'
+    return {'High':'high','Low':'low'}.get(taskbar_priority,'normal')
 
 
 def taskbar_title(psa_title):
@@ -201,6 +203,14 @@ def register_taskbar_sync(app, db, User, SalesTask, env=None, client=None):
         user_id = db.Column(db.Integer, db.ForeignKey('users.id', ondelete='CASCADE'), primary_key=True)
         taskbar_user_id = db.Column(db.String(36), unique=True, nullable=False)
         matched_at = db.Column(db.DateTime, nullable=False, default=now)
+
+    class TaskbarPendingAssignment(db.Model):
+        __tablename__ = 'taskbar_pending_assignments'
+        taskbar_task_id = db.Column(db.String(36), primary_key=True)
+        payload = db.Column(db.Text, nullable=False)
+        assignee_email = db.Column(db.String(320))
+        reason = db.Column(db.String(300), nullable=False)
+        updated_at = db.Column(db.DateTime, nullable=False, default=now)
 
     class Sync:
         """One per process. ``run_once`` is safe to call from several processes at once."""
@@ -336,7 +346,7 @@ def register_taskbar_sync(app, db, User, SalesTask, env=None, client=None):
             query = (db.session.query(SalesTask.id)
                      .outerjoin(SalesTaskLink, SalesTaskLink.sales_task_id == SalesTask.id)
                      .filter(or_(SalesTaskLink.sales_task_id.is_(None),
-                                 (SalesTask.version > SalesTaskLink.psa_version) & (SalesTaskLink.state != 'detached')))
+                                 (SalesTask.version > SalesTaskLink.psa_version) & (~SalesTaskLink.state.in_(('detached','unmapped')))))
                      .filter(or_(SalesTaskLink.next_attempt_at.is_(None), SalesTaskLink.next_attempt_at <= moment))
                      # Never backfill historic completed tasks that were never linked.
                      .filter(or_(SalesTaskLink.sales_task_id.isnot(None), SalesTask.status == 'open'))
@@ -360,6 +370,10 @@ def register_taskbar_sync(app, db, User, SalesTask, env=None, client=None):
                     except TaskbarError as exc:
                         db.session.rollback()
                         log.warning('Taskbar directory refresh failed: %s', exc)
+                for issue in TaskbarPendingAssignment.query.order_by(TaskbarPendingAssignment.updated_at).limit(limit).all():
+                    remote=json.loads(issue.payload)
+                    if self.psa_user(remote.get('assignee'),issue.assignee_email):
+                        self.handle_event({'event':'task.upsert','task':remote,'assignee_email':issue.assignee_email})
                 for task_id in self.pending_ids(limit):
                     result = self.push_one(task_id)
                     counts[result] = counts.get(result, 0) + 1
@@ -442,6 +456,8 @@ def register_taskbar_sync(app, db, User, SalesTask, env=None, client=None):
                         return 200, {'result': 'ignored_unknown'}
             deleted = payload.get('event') == 'task.deleted' or str(remote.get('program_id') or '').lower() != self.config.program_id
             if deleted:
+                TaskbarPendingAssignment.query.filter_by(taskbar_task_id=remote_id).delete()
+                db.session.commit()
                 if link:
                     link.state, link.last_error = 'detached', 'Removed from the Taskbar Sales program'
                     db.session.commit()
@@ -468,17 +484,35 @@ def register_taskbar_sync(app, db, User, SalesTask, env=None, client=None):
                 db.session.commit()
                 self.wake()
                 return 200, {'result': 'conflict_local_won'}
+            if not self.psa_user(remote.get('assignee'),payload.get('assignee_email')):
+                self.hold_assignment(remote,payload.get('assignee_email'))
+                link.state='unmapped';link.last_error='Taskbar assignee has no matching PSA Sales account'
+                db.session.commit()
+                return 202, {'result':'pending_unmapped','warning':link.last_error}
+            TaskbarPendingAssignment.query.filter_by(taskbar_task_id=remote_id).delete()
             result = self.apply_remote(link, remote, payload.get('assignee_email'))
             db.session.commit()
             if link.psa_version == 0:
                 self.wake()
             return 200, {'result': result}
 
+        def hold_assignment(self, remote, email):
+            issue=db.session.get(TaskbarPendingAssignment,str(remote['id']).lower())
+            if issue is None:
+                issue=TaskbarPendingAssignment(taskbar_task_id=str(remote['id']).lower())
+                db.session.add(issue)
+            elif int(json.loads(issue.payload).get('revision',0))>int(remote.get('revision',0)):
+                return
+            issue.payload=json.dumps(remote);issue.assignee_email=(email or '')[:320]
+            issue.reason='Taskbar assignee has no matching PSA Sales account. Invite that employee, then sync again.'
+            issue.updated_at=now()
+
         def create_from_remote(self, remote, assignee_email=None):
             owner = self.psa_user(remote.get('assignee'), assignee_email)
             if owner is None:
+                self.hold_assignment(remote,assignee_email)
                 db.session.commit()
-                return 200, {'result': 'ignored_unmapped'}
+                return 202, {'result': 'pending_unmapped','warning':'Task saved for review: assignee has no PSA Sales account.'}
             title = (remote.get('title') or '').strip()[:PSA_TITLE_MAX] or 'Taskbar task'
             status = to_psa_status(remote.get('status'))
             task = SalesTask(title=title, user_id=owner, due_at=parse_remote_time(remote.get('due_at')),
@@ -489,6 +523,7 @@ def register_taskbar_sync(app, db, User, SalesTask, env=None, client=None):
             link = SalesTaskLink(sales_task_id=task.id, origin='taskbar', psa_version=0)
             db.session.add(link)
             self.record(link, remote, task.version)
+            TaskbarPendingAssignment.query.filter_by(taskbar_task_id=str(remote['id']).lower()).delete()
             db.session.commit()
             return 201, {'result': 'created', 'sales_task_id': task.id}
 
@@ -573,6 +608,6 @@ def register_taskbar_sync(app, db, User, SalesTask, env=None, client=None):
         errors = [{'sales_task_id': row.sales_task_id, 'state': row.state, 'error': row.last_error}
                   for row in SalesTaskLink.query.filter(SalesTaskLink.last_error.isnot(None)).limit(20)]
         return jsonify(enabled=sync.config.enabled, links=states, mapped_users=TaskbarUserLink.query.count(),
-                       last_run=sync.last_run, recent_errors=errors)
+                       last_run=sync.last_run, recent_errors=errors, pending_assignments=[dict(taskbar_task_id=i.taskbar_task_id,assignee_email=i.assignee_email,title=json.loads(i.payload).get('title',''),reason=i.reason) for i in TaskbarPendingAssignment.query.order_by(TaskbarPendingAssignment.updated_at).limit(100)])
 
     return sync

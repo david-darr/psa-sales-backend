@@ -74,6 +74,7 @@ def _build_models():
         subject = db.Column(db.Text)
         attachments = db.Column(db.Boolean, nullable=False, default=False)
         template_snapshot = db.Column(db.Text)
+        audience = db.Column(db.String(50), nullable=True)
         campaign_id = db.Column(db.String(36))
         paused_reason = db.Column(db.Text)
         lease_owner = db.Column(db.String(36))
@@ -1004,7 +1005,7 @@ def queue_batch(user, options, token=None):
                        skipped=[{'school_id': row[0].id, 'reason': reason} for row, reason in skipped]), 400, None
 
     batch = OutreachBatch(user_id=user.id, kind=kind, status='queued', subject=options['subject'],
-                          campaign_id='standard',
+                          campaign_id='standard',audience=(options.get('template') or {}).get('audience'),
                           attachments=bool(options['attachments'] or (options.get('template') or {}).get('attachment_id') or options.get('catalog_files')),
                           template_snapshot=json.dumps(options['template']) if options.get('template') else None,
                           worker_token=str(uuid.uuid4()))

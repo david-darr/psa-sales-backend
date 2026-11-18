@@ -53,6 +53,45 @@ def main():
             assert response.status_code == 200, response.get_json()
             assert [r['school_name'] for r in response.get_json()['items']] == [expected]
             assert client.get('/api/crm/overview',headers=headers).get_json()['schools'] == 1
+        svc.db.session.remove()
+        # Checklist migration on an old schema, then idempotent re-application.
+        with svc.db.engine.begin() as conn:
+            conn.exec_driver_sql('DROP TABLE taskbar_pending_assignments')
+            conn.exec_driver_sql('ALTER TABLE outreach_batches DROP COLUMN audience')
+            conn.exec_driver_sql("DO $$ BEGIN IF NOT EXISTS(SELECT 1 FROM pg_roles WHERE rolname='anon') THEN CREATE ROLE anon; END IF; IF NOT EXISTS(SELECT 1 FROM pg_roles WHERE rolname='authenticated') THEN CREATE ROLE authenticated; END IF; END $$")
+        checklist=(Path(__file__).parents[1]/'migrations/20261118_psa_checklist.sql').read_text(encoding='utf-8-sig')
+        for _ in range(2):
+            connection=svc.db.engine.raw_connection()
+            try:
+                with connection.cursor() as cursor:cursor.execute(checklist)
+                connection.commit()
+            finally:connection.close()
+        with svc.db.engine.connect() as conn:
+            assert conn.exec_driver_sql("SELECT relrowsecurity FROM pg_class WHERE oid='taskbar_pending_assignments'::regclass").scalar() is True
+            assert not conn.exec_driver_sql("SELECT has_table_privilege('anon','taskbar_pending_assignments','SELECT')").scalar()
+        first=svc.SalesSchool(school_name='Merge fixture',email='merge@example.test',school_type='elementary',status='pending',user_id=1)
+        second=svc.SalesSchool(school_name='Merge fixture',email='merge@example.test',school_type='elementary',status='pending',user_id=1)
+        svc.db.session.add_all([first,second]);svc.db.session.commit()
+        first_id,second_id=first.id,second.id
+        svc.db.session.add(svc.SalesTask(title='Follow up',user_id=1,school_id=first_id,priority='low'))
+        svc.db.session.commit()
+        headers={'Authorization':'Bearer '+token}
+        body=dict(source_id=first_id,target_id=second_id)
+        review=client.post('/api/crm/schools/merge/preview',headers=headers,json=body)
+        assert review.status_code==200,review.get_json()
+        payload={**body,'review_token':review.get_json()['review_token']}
+        # Competing commits must produce one merge, with no duplicate history.
+        from concurrent.futures import ThreadPoolExecutor
+        def commit_once(_):
+            with svc.app.test_client() as worker_client:
+                return worker_client.post('/api/crm/schools/merge/commit',headers=headers,json=payload).status_code
+        svc.db.session.remove()
+        with ThreadPoolExecutor(max_workers=2) as pool:results=list(pool.map(commit_once,range(2)))
+        assert sorted(results)==[200,404],results
+        assert svc.SalesTask.query.filter_by(school_id=second_id,priority='low').count()==1
+        assert svc.SchoolContact.query.filter_by(school_id=second_id).count()==1
+        assert client.get('/api/outreach/reporting',headers=headers).status_code==200
+        print('Postgres checklist passed: migration twice, RLS/public grants, competing reviewed merges, contact dedupe, Low-priority task history and reporting.')
         print('Postgres passed: migration twice, existing school unchanged, RLS retained, constraints and separate workspace queries.')
 
 

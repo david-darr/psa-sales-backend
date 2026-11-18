@@ -79,9 +79,9 @@ class MappingTests(unittest.TestCase):
             self.assertEqual(ts.to_psa_status(remote), psa)
         self.assertEqual(ts.to_taskbar_priority('high'), 'High')
         self.assertEqual(ts.to_taskbar_priority('normal'), 'Medium')
-        self.assertEqual(ts.to_taskbar_priority('normal', 'Low'), 'Low')
+        self.assertEqual(ts.to_taskbar_priority('normal', 'Low'), 'Medium')
         self.assertEqual(ts.to_taskbar_priority('normal', 'High'), 'Medium')
-        self.assertEqual([ts.to_psa_priority(p) for p in ('High', 'Medium', 'Low')], ['high', 'normal', 'normal'])
+        self.assertEqual([ts.to_psa_priority(p) for p in ('High', 'Medium', 'Low')], ['high', 'normal', 'low'])
 
     def test_title_fits_taskbar_limit(self):
         self.assertEqual(ts.taskbar_title('  Call  '), 'Call')
@@ -308,6 +308,23 @@ class SyncTests(unittest.TestCase):
         self.sync.run_once()
         self.assertEqual(self.fake.tasks[tb_id]['status'], 'In Progress')
 
+    def test_unmapped_remote_task_is_retained_and_retried_after_account_exists(self):
+        remote=dict(id=str(uuid.uuid4()),title='Visit prospect',program_id=PROGRAM,revision=1,description='',status='Not Started',priority='Low',due_at='2026-11-20T16:00:00Z',assignee=str(uuid.uuid4()),updated_at=stamp(ts.now()))
+        response=self.post_event(self.event(remote,email='new@example.test'))
+        self.assertEqual(response.status_code,202)
+        Pending=service.db.Model.registry._class_registry['TaskbarPendingAssignment']
+        self.assertEqual(Pending.query.count(),1)
+        self.post_event(self.event(remote,email='new@example.test'))
+        self.assertEqual(Pending.query.count(),1)
+        self.assertEqual(service.SalesTask.query.count(),0)
+        service.db.session.add(service.User(name='New rep',email='new@example.test',password_hash='x',admin=False))
+        service.db.session.commit();self.sync.directory_at=time.time()
+        self.sync.run_once()
+        self.assertEqual(Pending.query.count(),0)
+        self.assertEqual(service.SalesTask.query.one().priority,'low')
+        self.post_event(self.event(remote,email='new@example.test'))
+        self.assertEqual(service.SalesTask.query.count(),1)
+
     def test_remote_completion_sets_completed_at_and_replay_is_harmless(self):
         task = self.make_task()
         self.sync.run_once()
@@ -376,10 +393,10 @@ class SyncTests(unittest.TestCase):
         response = self.post_event(self.event(remote))
         self.assertEqual(response.status_code, 201)
         task = service.db.session.get(service.SalesTask, response.get_json()['sales_task_id'])
-        self.assertEqual((task.user_id, task.priority, task.school_id), (self.other.id, 'normal', None))
+        self.assertEqual((task.user_id, task.priority, task.school_id), (self.other.id, 'low', None))
         self.assertEqual(self.sync.run_once(), {})
         unassigned = dict(remote, id=str(uuid.uuid4()), assignee=None)
-        self.assertEqual(self.post_event(self.event(unassigned)).get_json(), {'result': 'ignored_unmapped'})
+        self.assertEqual(self.post_event(self.event(unassigned)).get_json()['result'], 'pending_unmapped')
 
     def test_new_member_maps_by_email_on_first_event(self):
         newcomer = str(uuid.uuid4())

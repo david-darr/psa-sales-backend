@@ -534,8 +534,8 @@ def register_sequences(app, db, svc, out):
                     stop(enrollment, 'This campaign step is already reserved or sent'); db.session.commit(); continue
             if out.OutreachRecipient.query.filter_by(email=json.loads(enrollment.snapshot)['email']).filter(out.OutreachRecipient.status.in_(('queued','sending'))).first(): step.status='waiting'; db.session.commit(); continue
             snap, content = json.loads(enrollment.snapshot), json.loads(step.content)
-            batch = out.OutreachBatch(sales_workspace=enrollment.sales_workspace, user_id=uid, kind='sequence', campaign_id=enrollment.campaign_id,
-                status='queued', worker_token=str(uuid.uuid4()))
+            batch = out.OutreachBatch(sales_workspace=enrollment.sales_workspace, user_id=uid, kind='sequence',audience=snap['definition'].get('audience'),campaign_id=enrollment.campaign_id,
+                status='queued', worker_token=str(uuid.uuid4()),template_snapshot=json.dumps(next(item['template'] for item in snap['definition']['steps'] if item['number']==step.number)))
             db.session.add(batch); db.session.flush()
             recipient = out.OutreachRecipient(batch_id=batch.id, position=0, school_id=school_id, school_name=snap['school_name'], email=snap['email'],
                 status='queued', subject=content['subject'], body=content['body'], attachments=json.dumps(content['pdf_files']),

@@ -332,7 +332,7 @@ def register_crm_routes(app, db, User, School, SentEmail, Task, Activity, serial
                 return jsonify(error='School not found'), 404
             if school.user_id != owner_id:
                 return jsonify(error='Assign the task to this school’s owner'), 400
-        if data.get('priority', 'normal') not in ('normal', 'high'):
+        if data.get('priority', 'normal') not in ('low', 'normal', 'high'):
             return jsonify(error='Invalid priority'), 400
         try:
             due_at = parse_date(data.get('due_at'))
@@ -352,11 +352,11 @@ def register_crm_routes(app, db, User, School, SentEmail, Task, Activity, serial
         if not user or not task or (not user.admin and task.user_id != user.id):
             return jsonify(error='Task not found'), 404
         data = request.get_json(silent=True)
-        if not isinstance(data, dict) or any(key not in ('version', 'status', 'due_at') for key in data):
+        if not isinstance(data, dict) or any(key not in ('version', 'status', 'due_at', 'priority') for key in data):
             return jsonify(error='Supply a task status or due date'), 400
         if type(data.get('version')) is not int or data['version'] != task.version:
             return jsonify(error='This task changed. Refresh before trying again.'), 409
-        if 'status' not in data and 'due_at' not in data:
+        if 'status' not in data and 'due_at' not in data and 'priority' not in data:
             return jsonify(error='Supply a task status or due date'), 400
         if 'status' in data:
             if data['status'] not in ('open', 'completed'):
@@ -365,6 +365,9 @@ def register_crm_routes(app, db, User, School, SentEmail, Task, Activity, serial
                 return jsonify(error='This school changed owner. Create a new task for its current owner.'), 409
             task.status = data['status']
             task.completed_at = now() if task.status == 'completed' else None
+        if 'priority' in data:
+            if data['priority'] not in ('low','normal','high'):return jsonify(error='Choose Low, Normal or High priority'),400
+            task.priority=data['priority']
         if 'due_at' in data:
             try:
                 task.due_at = parse_date(data['due_at'])

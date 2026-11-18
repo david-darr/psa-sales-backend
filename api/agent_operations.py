@@ -88,6 +88,13 @@ operation('psa_create_business', 'Add a Business Sales prospect with duplicate c
 operation('psa_edit_business', 'Edit business details, sponsorship value, stage, notes, next action or owner (admin only).', 'sales_school_workspace','PATCH', {**{k:S for k in ('business_name','email','contact_name','phone','address','website','county','industry','sponsorship_value','status','notes','next_action','next_action_at')},'business_id':ID,'user_id':NULL_ID},['business_id'],'write',params={'business_id':'school_id'})
 
 # Every operation can select a sales area without granting extra role permissions.
+operation('psa_record_duplicates','Read possible duplicate profiles in the selected workspace. Shared mailboxes are warnings, not proof of duplication.','record_duplicates',properties={'school_id':ID},required=['school_id'],params={'school_id':'sid'})
+operation('psa_preview_record_merge','Admin: review merging a source profile into a retained profile. No records are changed. Returns an expiring review token.','preview_record_merge','POST',{'source_id':ID,'target_id':ID},['source_id','target_id'],'write',admin=True)
+operation('psa_commit_record_merge','Admin: commit the exact reviewed profile merge with its review token. Source is removed; linked history and suppression are preserved. Active outreach or stale reviews block merging.','commit_record_merge','POST',{'source_id':ID,'target_id':ID,'review_token':S},['source_id','target_id','review_token'],'write',admin=True)
+operation('psa_outreach_reporting','Read sent-message totals, Eastern-day summaries and conversation reply rates by template and audience. Admins see the team; employees see their own workspace outreach. Does not send email.','outreach_reporting',properties={'start':S,'end':S})
+operation('psa_taskbar_sync_status','Admin: read Taskbar sync errors and retained tasks waiting for a matching sales account. Does not change tasks or create accounts.','taskbar_status',admin=True)
+operation('psa_update_task_priority','Change an accessible sales task priority with its current version. Use low, normal or high; stale versions are rejected.','crm_update_task','PATCH',{'task_id':ID,'version':ID,'priority':{'enum':['low','normal','high']}},['task_id','version','priority'],'write',params={'task_id':'task_id'})
+
 for _operation in OPERATIONS:
     _operation['properties']['workspace'] = {'enum': ['school', 'business']}
 
